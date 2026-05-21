@@ -24,6 +24,11 @@ export default function Sidebar() {
     return () => { document.body.style.overflow = ""; };
   }, [drawerOpen]);
 
+  useEffect(() => {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    return () => { document.body.classList.remove("sidebar-collapsed"); };
+  }, [collapsed]);
+
   return (
     <>
       {/* ─────────────────── STYLES ─────────────────── */}
@@ -43,7 +48,7 @@ export default function Sidebar() {
           --muted      : #64748b;
           --text        : #0f172a;
 
-          --danger-bg  : rgba(239,68,68,0.08);
+          --danger-bg  : rgba(255, 0, 0, 0.28);
           --danger-bd  : rgba(239,68,68,0.15);
           --danger-hv  : rgba(239,68,68,0.15);
           --danger     : #ef4444;
@@ -147,6 +152,26 @@ export default function Sidebar() {
         }
         .sw-sidebar.is-collapsed .sw-logo {
           max-width: 0; opacity: 0; pointer-events: none;
+        }
+
+        /* small logo visible only when collapsed */
+        .sw-collapse-control {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+
+        .sw-collapsed-logo {
+          display: none;
+          width: 58px;
+          height: 58px;
+          object-fit: contain;
+          flex-shrink: 0;
+        }
+        .sw-sidebar.is-collapsed .sw-collapsed-logo {
+          display: block;
         }
 
         /* desktop collapse button */
@@ -286,7 +311,12 @@ export default function Sidebar() {
             transform: translateX(0);
             box-shadow: var(--shadow-lg);
           }
+          .sw-sidebar:not(.drawer-open) ~ .main-content {
+            margin-left: 0 !important;
+            width: 100% !important;
+          }
           .sw-desk-btn  { display:none; }
+          .sw-collapsed-logo { display:none !important; }
           .sw-close-btn { display:flex; }
           .sw-logo      { display:none; }
           /* no tooltips needed in full-width drawer */
@@ -306,7 +336,12 @@ export default function Sidebar() {
             transform: translateX(0);
             box-shadow: var(--shadow-lg);
           }
+          .sw-sidebar:not(.drawer-open) ~ .main-content {
+            margin-left: 0 !important;
+            width: 100% !important;
+          }
           .sw-desk-btn  { display:none; }
+          .sw-collapsed-logo { display:none !important; }
           .sw-close-btn { display:flex; }
           .sw-logo      { display:none; }
           .sw-tip { display:none !important; }
@@ -317,7 +352,7 @@ export default function Sidebar() {
           .topbar         { display:none; }
           .sw-overlay     { display:none !important; }
           .sw-close-btn   { display:none; }
-          .sw-desk-btn    { display:none; }
+          .sw-desk-btn    { display:flex; }
           .sw-sidebar     { transform:none !important; }
         }
 
@@ -383,15 +418,16 @@ export default function Sidebar() {
         {/* Logo row */}
         <div className="sw-logo-row">
           <img src="/transparent logo.png" alt="MediWatch Logo" className="sw-logo" />
-
-          {/* Desktop: collapse ↔ expand */}
-          <button
-            className="sw-desk-btn"
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setCollapsed(v => !v)}
-          >
-            {collapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-          </button>
+          <div className="sw-collapse-control">
+            <img src="/Desktop logo.png" alt="MediWatch" className="sw-collapsed-logo" />
+            <button
+              className="sw-desk-btn"
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              onClick={() => setCollapsed(v => !v)}
+            >
+              {collapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+            </button>
+          </div>
 
           {/* Mobile / Tablet: close drawer */}
           <button

@@ -153,10 +153,10 @@ export const DUMMY_PATIENTS: Patient[] = [
 ];
 
 export const DOCTOR = {
-  name: "Dr. Arjun Mehta",
+  name: "Dr. Vishnu",
   specialization: "Rheumatology",
   phone: "+91 98001 23456",
-  email: "dr.arjun@mediwatch.in",
+  email: "dr.vishnu@mediwatch.in",
   hospital: "Apollo Hospitals, Hyderabad",
   experience: "14 years",
   license: "MCI-AP-2010-4821",

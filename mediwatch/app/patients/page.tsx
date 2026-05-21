@@ -2,6 +2,7 @@
 import { useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import { DUMMY_PATIENTS } from "@/lib/dummyData";
+import { Search, Hospital, HeartPulse, PauseCircle, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
 
 export default function PatientsPage() {
@@ -32,7 +33,7 @@ export default function PatientsPage() {
   };
 
   return (
-    <div style={{ display: "flex" }}>
+    <div className="page-shell">
       <Sidebar />
       <main className="main-content" style={{ padding: 32 }}>
         <div style={{ marginBottom: 28 }}>
@@ -41,15 +42,15 @@ export default function PatientsPage() {
         </div>
 
         {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 20, marginBottom: 28 }}>
+        <div className="responsive-grid-4" style={{ marginBottom: 28 }}>
           {[
-            { label: "Total Patients", value: total, color: "#0f172a", bg: "#f8fafc", icon: "🏥" },
-            { label: "Active", value: active, color: "#15803d", bg: "#f0fdf4", icon: "💚" },
-            { label: "Inactive", value: inactive, color: "#a16207", bg: "#fefce8", icon: "⏸" },
-            { label: "Completed", value: completed, color: "#1d4ed8", bg: "#eff6ff", icon: "✅" },
+            { label: "Total Patients", value: total, color: "#0f172a", bg: "#f8fafc", icon: Hospital },
+            { label: "Active", value: active, color: "#15803d", bg: "#f0fdf4", icon: HeartPulse },
+            { label: "Inactive", value: inactive, color: "#a16207", bg: "#fefce8", icon: PauseCircle },
+            { label: "Completed", value: completed, color: "#1d4ed8", bg: "#eff6ff", icon: CheckCircle2 },
           ].map(c => (
             <div key={c.label} className="stat-card" style={{ background: c.bg }}>
-              <div style={{ fontSize: 26, marginBottom: 8 }}>{c.icon}</div>
+              <div style={{ fontSize: 26, marginBottom: 8 }}><c.icon size={26} /></div>
               <div className="heading-font" style={{ fontSize: 34, fontWeight: 800, color: c.color }}>{c.value}</div>
               <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>{c.label}</div>
             </div>
@@ -57,9 +58,9 @@ export default function PatientsPage() {
         </div>
 
         {/* Filter Row */}
-        <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <span style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)" }}>🔍</span>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 240 }}>
+            <span style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}><Search size={16} /></span>
             <input className="mw-input" style={{ paddingLeft: 44 }} placeholder="Search patients..."
               value={search} onChange={e => setSearch(e.target.value)} />
           </div>
@@ -75,8 +76,8 @@ export default function PatientsPage() {
         </div>
 
         {/* Table */}
-        <div style={{ background: "white", borderRadius: 20, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-          <div style={{ padding: "16px 24px", borderBottom: "1px solid #f1f5f9", display: "grid", gridTemplateColumns: "2fr 1fr 1.5fr 1fr 1fr 1fr 80px", gap: 16 }}>
+        <div className="table-responsive" style={{ background: "white", borderRadius: 20, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
+          <div className="responsive-table-grid responsive-table-grid-7 header" style={{ padding: "16px 24px", borderBottom: "1px solid #f1f5f9" }}>
             {["Patient", "Age/Gender", "Diagnosis", "Risk", "Status", "Registered", ""].map(h => (
               <div key={h} style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</div>
             ))}
@@ -84,9 +85,8 @@ export default function PatientsPage() {
           {filtered.map(p => {
             const sc = statusColor(p.status);
             return (
-              <div key={p.id} style={{
+              <div key={p.id} className="responsive-table-grid responsive-table-grid-7 row" style={{
                 padding: "16px 24px", borderBottom: "1px solid #f8fafc",
-                display: "grid", gridTemplateColumns: "2fr 1fr 1.5fr 1fr 1fr 1fr 80px",
                 gap: 16, alignItems: "center"
               }}
               onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}

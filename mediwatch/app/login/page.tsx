@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Smartphone, Lock } from "lucide-react";
 
 type Step = "login" | "reset1" | "reset2" | "reset3";
 
@@ -85,7 +86,7 @@ export default function LoginPage() {
                 <div style={{ marginBottom: 20 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>Phone Number</label>
                   <div style={{ position: "relative" }}>
-                    <span style={{ position: "absolute", left: 18, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>📱</span>
+                    <span style={{ position: "absolute", left: 18, top: "50%", transform: "translateY(-50%)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}><Smartphone size={16} /></span>
                     <input type="tel" placeholder="+91 98765 43210" value={phone} onChange={e => setPhone(e.target.value)}
                       required style={inputStyle}
                       onFocus={e => { e.target.style.borderColor = "#378ADD"; e.target.style.boxShadow = "0 0 0 4px rgba(55,138,221,0.15)"; }}
@@ -96,7 +97,7 @@ export default function LoginPage() {
                 <div style={{ marginBottom: 20 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>Password</label>
                   <div style={{ position: "relative" }}>
-                    <span style={{ position: "absolute", left: 18, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>🔒</span>
+                    <span style={{ position: "absolute", left: 18, top: "50%", transform: "translateY(-50%)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}><Lock size={16} /></span>
                     <input type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)}
                       required style={inputStyle}
                       onFocus={e => { e.target.style.borderColor = "#378ADD"; e.target.style.boxShadow = "0 0 0 4px rgba(55,138,221,0.15)"; }}
@@ -116,7 +117,7 @@ export default function LoginPage() {
                 </div>
 
                 <button type="submit" className="btn-primary" style={{ width: "100%", padding: "16px", fontSize: 16, borderRadius: 16 }}>
-                  Sign In →
+                  Sign In
                 </button>
 
                 <p style={{ textAlign: "center", color: "#94a3b8", fontSize: 12, marginTop: 16 }}>
@@ -148,7 +149,7 @@ export default function LoginPage() {
               {error && <div style={{ background: "#fee2e2", color: "#dc2626", padding: "10px 16px", borderRadius: 12, marginBottom: 16, fontSize: 14 }}>{error}</div>}
               <input type="text" className="mw-input" maxLength={6} placeholder="Enter 6-digit OTP"
                 value={otp} onChange={e => setOtp(e.target.value)}
-                style={{ textAlign: "center", fontSize: 24, letterSpacing: 12 }} />
+                style={{ textAlign: "center", fontSize: 18, letterSpacing: 5 }} />
               <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
                 <button className="btn-outline" onClick={() => { setStep("login"); setError(""); }} style={{ flex: 1 }}>Cancel</button>
                 <button className="btn-primary" onClick={verifyOTP} style={{ flex: 1 }}>Verify OTP</button>
