@@ -1,11 +1,12 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FileText, User, LogOut, Home, Menu, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { FileText, User, LogOut, Home, Menu, X, ChevronLeft, ChevronRight, Users } from "lucide-react";
 import { useState, useEffect } from "react";
 
 const navItems = [
   { href: "/dashboard",  label: "Dashboard",         icon: Home     },
+  { href: "/patients",   label: "All Patients",       icon: Users    },
   { href: "/register",   label: "Registration Form",  icon: FileText },
   { href: "/profile",    label: "Profile",            icon: User     },
 ];
@@ -14,8 +15,9 @@ export default function Sidebar() {
   const pathname = usePathname();
   const router   = useRouter();
 
-  const [drawerOpen, setDrawerOpen] = useState(false);   // mobile + tablet drawer
-  const [collapsed,  setCollapsed]  = useState(false);   // desktop icon-only
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [collapsed,  setCollapsed]  = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
 
   useEffect(() => { setDrawerOpen(false); }, [pathname]);
 
@@ -29,9 +31,31 @@ export default function Sidebar() {
     return () => { document.body.classList.remove("sidebar-collapsed"); };
   }, [collapsed]);
 
+  async function handleLogout() {
+    try {
+      const token = localStorage.getItem("doctor_token");
+      if (token) {
+        await fetch("https://api.mediwatch.in/api/v1/auth/staff/logout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({}),
+        });
+      }
+    } catch {
+      // proceed with local logout even if API call fails
+    } finally {
+      localStorage.removeItem("doctor_token");
+      document.cookie = "doctor_token=; path=/; max-age=0; SameSite=Strict";
+      setShowLogoutModal(false);
+      router.push("/login");
+    }
+  }
+
   return (
     <>
-      {/* ─────────────────── STYLES ─────────────────── */}
       <style>{`
         :root {
           --sw-full : 300px;
@@ -62,9 +86,8 @@ export default function Sidebar() {
           --shadow-lg  : 0 8px 40px rgba(0,0,0,0.18);
         }
 
-        /* ──────────── TOP BAR ──────────── */
         .topbar {
-          display     : none;          /* shown only ≤ 1023 px */
+          display     : none;
           position    : fixed;
           top: 0; left: 0; right: 0;
           height      : var(--topbar-h);
@@ -86,7 +109,7 @@ export default function Sidebar() {
           object-fit: contain;
         }
         .topbar-btn {
-          position : relative; z-index: 1;   /* above centered logo */
+          position : relative; z-index: 1;
           display  : flex;
           align-items: center;
           justify-content: center;
@@ -100,7 +123,6 @@ export default function Sidebar() {
         }
         .topbar-btn:hover { background: var(--brand-12); color: var(--brand); }
 
-        /* ──────────── OVERLAY ──────────── */
         .sw-overlay {
           display  : none;
           position : fixed; inset: 0;
@@ -114,7 +136,6 @@ export default function Sidebar() {
         }
         .sw-overlay.on { opacity: 1; pointer-events: all; }
 
-        /* ──────────── SIDEBAR SHELL ──────────── */
         .sw-sidebar {
           position  : fixed;
           top: 0; left: 0;
@@ -132,7 +153,6 @@ export default function Sidebar() {
         }
         .sw-sidebar.is-collapsed { width: var(--sw-icon); }
 
-        /* ──────────── LOGO ROW ──────────── */
         .sw-logo-row {
           display  : flex;
           align-items: center;
@@ -154,7 +174,6 @@ export default function Sidebar() {
           max-width: 0; opacity: 0; pointer-events: none;
         }
 
-        /* small logo visible only when collapsed */
         .sw-collapse-control {
           display: flex;
           flex-direction: column;
@@ -174,7 +193,6 @@ export default function Sidebar() {
           display: block;
         }
 
-        /* desktop collapse button */
         .sw-desk-btn {
           display: flex;
           align-items: center; justify-content: center;
@@ -189,7 +207,6 @@ export default function Sidebar() {
         }
         .sw-desk-btn:hover { background: var(--brand-12); color: var(--brand); }
 
-        /* sidebar close button (mobile/tablet) */
         .sw-close-btn {
           display: none;
           align-items: center; justify-content: center;
@@ -204,7 +221,6 @@ export default function Sidebar() {
         }
         .sw-close-btn:hover { background: var(--danger-bg); color: var(--danger); }
 
-        /* ──────────── NAV ──────────── */
         .sw-nav { flex:1; padding:10px 12px; overflow-y:auto; overflow-x:hidden; }
         .sw-nav::-webkit-scrollbar { width:3px; }
         .sw-nav::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
@@ -245,13 +261,11 @@ export default function Sidebar() {
         }
         .sw-itext.bold { font-weight:600; }
 
-        /* collapsed overrides */
         .sw-sidebar.is-collapsed .sw-nav   { padding:10px 6px; }
         .sw-sidebar.is-collapsed .sw-item  { justify-content:center; padding:11px; border-right:none; }
         .sw-sidebar.is-collapsed .sw-item.active { background:var(--brand-12); }
         .sw-sidebar.is-collapsed .sw-itext { opacity:0; width:0; }
 
-        /* tooltip */
         .sw-tip {
           position:absolute;
           left: calc(var(--sw-icon) + 6px);
@@ -268,7 +282,6 @@ export default function Sidebar() {
         .sw-sidebar.is-collapsed .sw-tip             { display:block; }
         .sw-sidebar.is-collapsed .sw-item:hover .sw-tip { opacity:1; }
 
-        /* ──────────── LOGOUT ──────────── */
         .sw-logout { padding:12px 12px 28px; flex-shrink:0; }
         .sw-sidebar.is-collapsed .sw-logout { padding:12px 6px 28px; }
 
@@ -293,12 +306,6 @@ export default function Sidebar() {
         .sw-sidebar.is-collapsed .sw-logout-btn { justify-content:center; padding:11px; }
         .sw-sidebar.is-collapsed .sw-logout-txt { opacity:0; width:0; }
 
-
-        /* ═══════════════════════════════════
-           RESPONSIVE BREAKPOINTS
-        ═══════════════════════════════════ */
-
-        /* TABLET  768 – 1023 px */
         @media (max-width:1023px) and (min-width:768px) {
           .topbar     { display:flex; }
           .sw-overlay { display:block; }
@@ -319,11 +326,9 @@ export default function Sidebar() {
           .sw-collapsed-logo { display:none !important; }
           .sw-close-btn { display:flex; }
           .sw-logo      { display:none; }
-          /* no tooltips needed in full-width drawer */
           .sw-tip { display:none !important; }
         }
 
-        /* MOBILE  < 768 px */
         @media (max-width:767px) {
           .topbar     { display:flex; }
           .sw-overlay { display:block; }
@@ -347,7 +352,6 @@ export default function Sidebar() {
           .sw-tip { display:none !important; }
         }
 
-        /* DESKTOP  ≥ 1024 px */
         @media (min-width:1024px) {
           .topbar         { display:none; }
           .sw-overlay     { display:none !important; }
@@ -355,32 +359,10 @@ export default function Sidebar() {
           .sw-desk-btn    { display:flex; }
           .sw-sidebar     { transform:none !important; }
         }
-
-        /*
-          ── LAYOUT HELPER for your root layout ──
-          Apply these classes to your <main> / page wrapper:
-
-          .page-body {
-            margin-left: var(--sw-full);
-            transition : margin-left var(--dur) var(--ease);
-          }
-          .page-body.sidebar-collapsed {
-            margin-left: var(--sw-icon);
-          }
-          @media (max-width:1023px) {
-            .page-body,
-            .page-body.sidebar-collapsed {
-              margin-left : 0;
-              padding-top : var(--topbar-h);
-            }
-          }
-        */
       `}</style>
 
-
-      {/* ══════════ TOP BAR  (tablet + mobile only) ══════════ */}
+      {/* TOP BAR (tablet + mobile) */}
       <header className="topbar" role="banner">
-        {/* Toggle button – left */}
         <button
           className="topbar-btn"
           aria-label={drawerOpen ? "Close navigation" : "Open navigation"}
@@ -389,29 +371,23 @@ export default function Sidebar() {
         >
           {drawerOpen ? <X size={20} /> : <Menu size={20} />}
         </button>
-
-        {/* Logo – centered via absolute positioning in CSS */}
         <img src="/transparent logo.png" alt="MediWatch" className="topbar-logo" />
-
-        {/* Right spacer to balance the toggle button */}
         <div style={{ width: 40 }} aria-hidden="true" />
       </header>
 
-
-      {/* ══════════ OVERLAY ══════════ */}
+      {/* OVERLAY */}
       <div
         className={`sw-overlay${drawerOpen ? " on" : ""}`}
         onClick={() => setDrawerOpen(false)}
         aria-hidden="true"
       />
 
-
-      {/* ══════════ SIDEBAR ══════════ */}
+      {/* SIDEBAR */}
       <aside
         className={[
           "sw-sidebar",
-          collapsed   ? "is-collapsed" : "",
-          drawerOpen  ? "drawer-open"  : "",
+          collapsed  ? "is-collapsed" : "",
+          drawerOpen ? "drawer-open"  : "",
         ].filter(Boolean).join(" ")}
         aria-label="Main navigation"
       >
@@ -428,8 +404,6 @@ export default function Sidebar() {
               {collapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
             </button>
           </div>
-
-          {/* Mobile / Tablet: close drawer */}
           <button
             className="sw-close-btn"
             aria-label="Close navigation"
@@ -442,9 +416,11 @@ export default function Sidebar() {
         {/* Nav */}
         <nav className="sw-nav">
           <div className="sw-label">Menu</div>
-
           {navItems.map(item => {
-            const active = pathname.startsWith(item.href);
+            // exact match for dashboard, startsWith for everything else
+            const active = item.href === "/dashboard"
+              ? pathname === "/dashboard"
+              : pathname.startsWith(item.href);
             return (
               <Link key={item.href} href={item.href} className="sw-link">
                 <div className={`sw-item${active ? " active" : ""}`}>
@@ -471,7 +447,7 @@ export default function Sidebar() {
         <div className="sw-logout">
           <button
             className="sw-logout-btn"
-            onClick={() => router.push("/login")}
+            onClick={() => setShowLogoutModal(true)}
             aria-label="Logout"
           >
             <LogOut size={18} strokeWidth={1.5} style={{ flexShrink: 0 }} />
@@ -479,6 +455,90 @@ export default function Sidebar() {
           </button>
         </div>
       </aside>
+
+      {/* LOGOUT MODAL */}
+      {showLogoutModal && (
+        <>
+          <div
+            onClick={() => setShowLogoutModal(false)}
+            style={{
+              position: "fixed", inset: 0, zIndex: 1000,
+              background: "rgba(15,23,42,0.55)",
+              backdropFilter: "blur(4px)",
+              WebkitBackdropFilter: "blur(4px)",
+              animation: "fadeIn 0.2s ease",
+            }}
+            aria-hidden="true"
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="logout-title"
+            style={{
+              position: "fixed", zIndex: 1001,
+              top: "50%", left: "50%",
+              transform: "translate(-50%, -50%)",
+              background: "#ffffff",
+              borderRadius: 20,
+              boxShadow: "0 24px 60px rgba(0,0,0,0.22)",
+              padding: "32px 28px 24px",
+              width: "min(90vw, 360px)",
+              textAlign: "center",
+              animation: "slideUp 0.22s cubic-bezier(0.4,0,0.2,1)",
+            }}
+          >
+            <div style={{
+              width: 56, height: 56, borderRadius: "50%",
+              background: "rgba(239,68,68,0.1)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              margin: "0 auto 16px",
+            }}>
+              <LogOut size={24} strokeWidth={1.8} style={{ color: "#ef4444" }} />
+            </div>
+            <h3 id="logout-title" style={{ fontSize: 18, fontWeight: 700, color: "#0f172a", margin: "0 0 8px" }}>
+              Confirm Logout
+            </h3>
+            <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 24px", lineHeight: 1.5 }}>
+              Are you sure you want to sign out of your account?
+            </p>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => setShowLogoutModal(false)}
+                style={{
+                  flex: 1, padding: "12px",
+                  borderRadius: 12, border: "1.5px solid #e2e8f0",
+                  background: "#f8fafc", color: "#374151",
+                  fontSize: 14, fontWeight: 600, cursor: "pointer",
+                  transition: "background 0.2s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = "#f1f5f9")}
+                onMouseLeave={e => (e.currentTarget.style.background = "#f8fafc")}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLogout}
+                style={{
+                  flex: 1, padding: "12px",
+                  borderRadius: 12, border: "none",
+                  background: "linear-gradient(to right, #dc2626, #ef4444)",
+                  color: "#fff",
+                  fontSize: 14, fontWeight: 600, cursor: "pointer",
+                  transition: "opacity 0.2s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = "0.88")}
+                onMouseLeave={e => (e.currentTarget.style.opacity = "1")}
+              >
+                Yes, Logout
+              </button>
+            </div>
+          </div>
+          <style>{`
+            @keyframes fadeIn  { from { opacity: 0 } to { opacity: 1 } }
+            @keyframes slideUp { from { opacity: 0; transform: translate(-50%, -46%) } to { opacity: 1; transform: translate(-50%, -50%) } }
+          `}</style>
+        </>
+      )}
     </>
   );
 }
