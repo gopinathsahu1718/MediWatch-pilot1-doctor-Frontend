@@ -68,7 +68,7 @@ function FieldCard({ label, value, icon: Icon }: { label: string; value?: string
 }
 
 // ─── Password Input ───────────────────────────────────────────────────────────
-function PasswordInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) {
+function PasswordInput({ value, onChange, placeholder, hasError = false }: { value: string; onChange: (v: string) => void; placeholder: string; hasError?: boolean }) {
   const [show, setShow] = useState(false);
   return (
     <div style={{ position: "relative" }}>
@@ -78,14 +78,18 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
         placeholder={placeholder}
         value={value}
         onChange={e => onChange(e.target.value)}
-        style={{ paddingRight: 44 }}
+        style={{ 
+          paddingRight: 44,
+          borderColor: hasError ? "#dc2626" : undefined,
+          borderWidth: hasError ? "1.5px" : undefined,
+        }}
       />
       <button
         type="button"
         onClick={() => setShow(v => !v)}
         style={{
           position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)",
-          background: "none", border: "none", cursor: "pointer", color: "#94a3b8", display: "flex",
+          background: "none", border: "none", cursor: "pointer", color: hasError ? "#dc2626" : "#94a3b8", display: "flex",
         }}
       >
         {show ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -112,6 +116,7 @@ export default function ProfilePage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
   const [pwError, setPwError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{ current?: boolean; new?: boolean; confirm?: boolean }>({});
 
   // Toast
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
@@ -186,9 +191,28 @@ export default function ProfilePage() {
   // ── Change password ────────────────────────────────────────────────────────
   async function handleChangePassword() {
     setPwError("");
-    if (!currentPassword) { setPwError("Enter your current password."); return; }
-    if (newPassword.length < 6) { setPwError("New password must be at least 6 characters."); return; }
-    if (newPassword !== confirmPassword) { setPwError("Passwords do not match."); return; }
+    setFieldErrors({});
+    const errors: { current?: boolean; new?: boolean; confirm?: boolean } = {};
+    let hasError = false;
+
+    if (!currentPassword) { 
+      setPwError("Enter your current password.");
+      errors.current = true;
+      hasError = true;
+    }
+    if (newPassword.length < 6) { 
+      setPwError("New password must be at least 6 characters.");
+      errors.new = true;
+      hasError = true;
+    }
+    if (newPassword !== confirmPassword) { 
+      setPwError("Passwords do not match.");
+      errors.confirm = true;
+      hasError = true;
+    }
+    
+    setFieldErrors(errors);
+    if (hasError) return;
 
     setPwLoading(true);
     try {
@@ -213,6 +237,7 @@ export default function ProfilePage() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
+      setFieldErrors({});
       showToast("Password changed successfully!", "success");
     } catch {
       setPwError("Network error. Please try again.");
@@ -220,6 +245,14 @@ export default function ProfilePage() {
       setPwLoading(false);
     }
   }
+
+  // Auto-dismiss error message after 10 seconds
+  useEffect(() => {
+    if (pwError) {
+      const t = setTimeout(() => setPwError(""), 10000);
+      return () => clearTimeout(t);
+    }
+  }, [pwError]);
 
   // ── Derived display values ─────────────────────────────────────────────────
   const initials = profile?.name
@@ -411,16 +444,16 @@ export default function ProfilePage() {
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                   <div>
-                    <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>Current Password</label>
-                    <PasswordInput value={currentPassword} onChange={setCurrentPassword} placeholder="Enter current password" />
+                    <label style={{ fontSize: 13, fontWeight: 600, color: fieldErrors.current ? "#dc2626" : "#374151", display: "block", marginBottom: 8 }}>Current Password</label>
+                    <PasswordInput value={currentPassword} onChange={setCurrentPassword} placeholder="Enter current password" hasError={fieldErrors.current} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>New Password</label>
-                    <PasswordInput value={newPassword} onChange={setNewPassword} placeholder="At least 6 characters" />
+                    <label style={{ fontSize: 13, fontWeight: 600, color: fieldErrors.new ? "#dc2626" : "#374151", display: "block", marginBottom: 8 }}>New Password</label>
+                    <PasswordInput value={newPassword} onChange={setNewPassword} placeholder="At least 6 characters" hasError={fieldErrors.new} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>Confirm New Password</label>
-                    <PasswordInput value={confirmPassword} onChange={setConfirmPassword} placeholder="Re-enter new password" />
+                    <label style={{ fontSize: 13, fontWeight: 600, color: fieldErrors.confirm ? "#dc2626" : "#374151", display: "block", marginBottom: 8 }}>Confirm New Password</label>
+                    <PasswordInput value={confirmPassword} onChange={setConfirmPassword} placeholder="Re-enter new password" hasError={fieldErrors.confirm} />
                   </div>
 
                   {/* Strength indicator */}

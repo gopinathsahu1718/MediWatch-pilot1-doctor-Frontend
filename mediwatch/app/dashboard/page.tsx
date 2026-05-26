@@ -23,6 +23,7 @@ interface ApiPatient {
   risk_category?: "high" | "medium" | "low";
   day_number: number;
   has_unack_alert: boolean | null;
+  alert_id: string | null;
   age?: number;
   gender?: string;
   diagnosis?: string;
@@ -52,6 +53,7 @@ interface Patient {
   id: string;
   name: string;
   risk: "High" | "Medium" | "Low";
+  trendStatus: "red" | "yellow" | "green";
   age: number;
   gender: string;
   diagnosis: string;
@@ -59,52 +61,76 @@ interface Patient {
   dayNumber: number;
   contact: string;
   relativeContact?: string;
-  hasUnackAlert: boolean;
+  hasUnackAlert: boolean | null;
+  alertId: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Maps API trend_status → UI risk label */
-const trendToRisk = (trend: NonNullable<ApiPatient["trend_status"]>): Patient["risk"] => {
-  if (trend === "red") return "High";
-  if (trend === "yellow") return "Medium";
-  return "Low";
-};
-
-/** Maps API risk_category → UI risk label (fallback when trend_status is null) */
+/**
+ * Maps API risk_category → UI risk label.
+ * risk_category is the doctor-assigned clinical risk — this is the primary source.
+ */
 const riskCategoryToRisk = (cat?: string): Patient["risk"] => {
   if (cat === "high") return "High";
   if (cat === "medium") return "Medium";
   return "Low";
 };
 
-/** Maps UI risk label → API filter param */
+/**
+ * Maps UI risk filter label → API filter param (trend_status values).
+ * The API filters by trend_status values (red/yellow/green).
+ */
 const riskToFilterParam = (risk: string): string | null => {
-  if (risk === "High") return "red";
-  if (risk === "Medium") return "yellow";
-  if (risk === "Low") return "green";
+  if (risk === "Red") return "red";
+  if (risk === "Yellow") return "yellow";
+  if (risk === "Green") return "green";
   return null;
 };
 
-/** Normalises a raw API patient into the UI shape */
+/**
+ * Normalises a raw API patient into the UI shape.
+ */
 const normalisePatient = (p: ApiPatient): Patient => ({
   id: p.id,
   name: p.name,
-  // trend_status may be null — fall back to risk_category
-  risk: p.trend_status
-    ? trendToRisk(p.trend_status)
-    : riskCategoryToRisk(p.risk_category),
+  risk: p.risk_category ? riskCategoryToRisk(p.risk_category) : "Low",
+  trendStatus: p.trend_status ?? "green",
   age: p.age ?? 0,
   gender: p.gender ?? "—",
-  // API returns disease_name; fall back to diagnosis
   diagnosis: p.disease_name ?? p.diagnosis ?? "—",
   monitoringDays: p.monitoring_days ?? 0,
   dayNumber: p.day_number,
-  // API returns phone / relative_phone
   contact: p.phone ?? p.contact ?? "",
   relativeContact: p.relative_phone ?? p.relative_contact,
-  hasUnackAlert: p.has_unack_alert ?? false,
+  hasUnackAlert: p.has_unack_alert,
+  alertId: p.alert_id ?? null,
 });
+
+// ─── Trend helpers ────────────────────────────────────────────────────────────
+
+const trendLabel = (status: Patient["trendStatus"]) => {
+  if (status === "red") return "↓ Red";
+  if (status === "yellow") return "→ Yellow";
+  return "↑ Green";
+};
+
+const trendStyle = (status: Patient["trendStatus"]): React.CSSProperties => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  padding: "3px 10px",
+  borderRadius: 99,
+  fontSize: 12,
+  fontWeight: 600,
+  background:
+    status === "red" ? "#fee2e2" : status === "yellow" ? "#fef9c3" : "#dcfce7",
+  color:
+    status === "red" ? "#dc2626" : status === "yellow" ? "#a16207" : "#15803d",
+});
+
+const trendColor = (status: Patient["trendStatus"]) =>
+  status === "red" ? "#dc2626" : status === "yellow" ? "#a16207" : "#15803d";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -127,6 +153,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
 
   // ── Fetch dashboard data ──────────────────────────────────────────────────
+
   const fetchDashboard = useCallback(async (search: string, riskFilter: string) => {
     setLoading(true);
     setError(null);
@@ -135,7 +162,7 @@ export default function DashboardPage() {
       const filterParam = riskToFilterParam(riskFilter);
       if (filterParam) params.set("filter", filterParam);
       if (search.trim()) params.set("search", search.trim());
-
+      console.log(params.toString());
       const res = await fetch(
         `https://api.mediwatch.in/api/v1/doctor/dashboard${params.toString() ? `?${params}` : ""}`,
         {
@@ -169,7 +196,11 @@ export default function DashboardPage() {
         : Array.isArray(data?.data)
         ? data.data
         : [];
-      setPatients(list.map(normalisePatient));
+      
+      // Normalize patients
+      const normalizedPatients = list.map(normalisePatient);
+      
+      setPatients(normalizedPatients);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -185,6 +216,31 @@ export default function DashboardPage() {
     }, 300);
     return () => clearTimeout(timer);
   }, [search, riskFilter, fetchDashboard]);
+
+  // Re-sort patients when acknowledged set changes or after initial fetch
+  useEffect(() => {
+    if (patients.length === 0) return;
+    setPatients(prevPatients => {
+      return [...prevPatients].sort((a, b) => {
+        const aIsAck = acknowledged.has(a.id) || a.alertId === null;
+        const bIsAck = acknowledged.has(b.id) || b.alertId === null;
+        return (aIsAck ? 1 : 0) - (bIsAck ? 1 : 0);
+      });
+    });
+  }, [acknowledged]);
+
+  // Initial sort after data loads
+  useEffect(() => {
+    if (!loading && patients.length > 0) {
+      setPatients(prevPatients => {
+        return [...prevPatients].sort((a, b) => {
+          const aIsAck = a.alertId === null;
+          const bIsAck = b.alertId === null;
+          return (aIsAck ? 1 : 0) - (bIsAck ? 1 : 0);
+        });
+      });
+    }
+  }, [loading]);
 
   // ── Pagination ────────────────────────────────────────────────────────────
   const totalPages = Math.max(1, Math.ceil(patients.length / PAGE_SIZE));
@@ -228,6 +284,26 @@ export default function DashboardPage() {
           </p>
         </div>
 
+        {/* Skeleton keyframe style */}
+        <style>{`
+          @keyframes mw-shimmer {
+            0%   { background-position: -600px 0; }
+            100% { background-position:  600px 0; }
+          }
+          .mw-skeleton {
+            background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+            background-size: 600px 100%;
+            animation: mw-shimmer 1.4s infinite linear;
+            border-radius: 8px;
+          }
+          .responsive-table-grid-7 {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 2fr 1fr 1fr 1.5fr;
+            gap: 16px;
+            align-items: center;
+          }
+        `}</style>
+
         {/* Stat Cards */}
         <div className="responsive-grid-4" style={{ marginBottom: 32 }}>
           {[
@@ -239,17 +315,29 @@ export default function DashboardPage() {
             <div
               key={card.label}
               className="stat-card"
-              style={{ background: card.bg, border: `1px solid ${card.color}22` }}
+              style={{ background: loading ? "#f8fafc" : card.bg, border: `1px solid ${loading ? "#e2e8f0" : card.color + "22"}` }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 10 }}>
-                <card.icon size={28} color={card.color} />
-                <div className="heading-font" style={{ fontSize: 36, fontWeight: 800, color: card.color }}>
-                  {loading ? "—" : card.value}
-                </div>
-              </div>
-              <div style={{ color: "#64748b", fontSize: 13, fontWeight: 500, marginTop: 4 }}>
-                {card.label}
-              </div>
+              {loading ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 12 }}>
+                    <div className="mw-skeleton" style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0 }} />
+                    <div className="mw-skeleton" style={{ width: 56, height: 36 }} />
+                  </div>
+                  <div className="mw-skeleton" style={{ width: 80, height: 13 }} />
+                </>
+              ) : (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 10 }}>
+                    <card.icon size={28} color={card.color} />
+                    <div className="heading-font" style={{ fontSize: 36, fontWeight: 800, color: card.color }}>
+                      {card.value}
+                    </div>
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: 13, fontWeight: 500, marginTop: 4 }}>
+                    {card.label}
+                  </div>
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -290,7 +378,7 @@ export default function DashboardPage() {
 
           {/* Desktop filter chips */}
           <div className="filter-chips-desktop">
-            {["All", "High", "Medium", "Low"].map(f => (
+            {["All", "Red", "Yellow", "Green"].map(f => (
               <button
                 key={f}
                 onClick={() => handleFilter(f)}
@@ -320,7 +408,7 @@ export default function DashboardPage() {
             }}
           >
             <SlidersHorizontal size={15} />
-            {riskFilter !== "All" ? riskFilter : "Filter"}
+            {riskFilter !== "All" ? `${riskFilter} Trend` : "Filter"}
           </button>
         </div>
 
@@ -352,12 +440,12 @@ export default function DashboardPage() {
           background: "white", borderRadius: 20, overflow: "hidden",
           boxShadow: "0 4px 20px rgba(0,0,0,0.06)",
         }}>
-          {/* Desktop table header */}
+          {/* Desktop table header — 7 columns */}
           <div
-            className="patient-table-header responsive-table-grid responsive-table-grid-6 header"
+            className="patient-table-header responsive-table-grid-7 header"
             style={{ padding: "16px 24px", borderBottom: "1px solid #f1f5f9" }}
           >
-            {["Patient", "Risk", "Diagnosis", "Days Left", "Status", "Actions"].map(h => (
+            {["Patient", "Trend", "Risk", "Diagnosis", "Days Left", "Status", "Actions"].map(h => (
               <div key={h} style={{
                 fontSize: 12, fontWeight: 700, color: "#94a3b8",
                 textTransform: "uppercase", letterSpacing: "0.05em",
@@ -374,14 +462,14 @@ export default function DashboardPage() {
 
           {/* Rows */}
           {!loading && paginated.map(p => {
-            const isAck = acknowledged.has(p.id) || !p.hasUnackAlert;
-            const daysLeft = p.monitoringDays > 0 ? p.monitoringDays - p.dayNumber : p.dayNumber;
+            const isAck = acknowledged.has(p.id) || p.alertId === null;
+            const daysLeft = p.monitoringDays > 0 ? p.monitoringDays - p.dayNumber : 0;
 
             return (
               <div key={p.id}>
-                {/* Desktop row */}
+                {/* Desktop row — 7 columns */}
                 <div
-                  className="patient-desktop-row responsive-table-grid responsive-table-grid-6 row"
+                  className="patient-desktop-row responsive-table-grid-7 row"
                   style={{
                     padding: "16px 24px", borderBottom: "1px solid #eef1f4",
                     gap: 16, alignItems: "center", transition: "background 0.15s", cursor: "pointer",
@@ -390,25 +478,43 @@ export default function DashboardPage() {
                   onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                   onMouseLeave={e => (e.currentTarget.style.background = "white")}
                 >
+                  {/* Patient */}
                   <div>
                     <div style={{ fontWeight: 600, color: "#0f172a", fontSize: 14 }}>{p.name}</div>
                     <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
                       {p.id}{p.age ? ` • ${p.age}y` : ""}{p.gender !== "—" ? ` ${p.gender}` : ""}
                     </div>
                   </div>
+
+                  {/* Trend ← NEW column */}
+                  <div>
+                    <span style={trendStyle(p.trendStatus)}>
+                      {trendLabel(p.trendStatus)}
+                    </span>
+                  </div>
+
+                  {/* Risk */}
                   <div><span className={riskBadge(p.risk)}>{p.risk}</span></div>
+
+                  {/* Diagnosis */}
                   <div style={{ fontSize: 13, color: "#475569" }}>
                     {p.diagnosis.split(" ").slice(0, 3).join(" ")}
                   </div>
+
+                  {/* Days Left */}
                   <div style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>
                     {daysLeft > 0 ? `${daysLeft}d` : "—"}
                   </div>
+
+                  {/* Status */}
                   <div>
                     {isAck
                       ? <span style={{ fontSize: 12, color: "#15803d", fontWeight: 600 }}>✓ Acknowledged</span>
                       : <span style={{ fontSize: 12, color: "#94a3b8" }}>Pending</span>
                     }
                   </div>
+
+                  {/* Actions */}
                   <div style={{ display: "flex", gap: 6 }}>
                     <Link href={`#`}>
                       <button
@@ -490,26 +596,56 @@ export default function DashboardPage() {
 
                         <div style={{ height: 1, background: "#f1f5f9", marginBottom: 14 }} />
 
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
-                          {[
-                            { label: "Diagnosis", value: p.diagnosis.split(" ").slice(0, 3).join(" ") },
-                            { label: "Days Left",  value: daysLeft > 0 ? `${daysLeft}d` : "—", highlight: daysLeft <= 3 && daysLeft > 0 },
-                            { label: "Status",     value: isAck ? "✓ Done" : "Pending", isAck },
-                          ].map(stat => (
-                            <div key={stat.label} style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
-                              <div style={{
-                                fontSize: 10, fontWeight: 700, color: "#94a3b8",
-                                textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4,
-                              }}>{stat.label}</div>
-                              <div style={{
-                                fontSize: 13, fontWeight: 600,
-                                color: stat.isAck !== undefined
-                                  ? (stat.isAck ? "#15803d" : "#f59e0b")
-                                  : stat.highlight ? "#dc2626" : "#1e293b",
-                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                              }}>{stat.value}</div>
-                            </div>
-                          ))}
+                        {/* Mobile stats grid — 2×2 with Trend added */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+                          {/* Trend */}
+                          <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
+                            <div style={{
+                              fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4,
+                            }}>Trend</div>
+                            <div style={{
+                              fontSize: 13, fontWeight: 600,
+                              color: trendColor(p.trendStatus),
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            }}>{trendLabel(p.trendStatus)}</div>
+                          </div>
+
+                          {/* Diagnosis */}
+                          <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
+                            <div style={{
+                              fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4,
+                            }}>Diagnosis</div>
+                            <div style={{
+                              fontSize: 13, fontWeight: 600, color: "#1e293b",
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            }}>{p.diagnosis.split(" ").slice(0, 3).join(" ")}</div>
+                          </div>
+
+                          {/* Days Left */}
+                          <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
+                            <div style={{
+                              fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4,
+                            }}>Days Left</div>
+                            <div style={{
+                              fontSize: 13, fontWeight: 600,
+                              color: daysLeft <= 3 && daysLeft > 0 ? "#dc2626" : "#1e293b",
+                            }}>{daysLeft > 0 ? `${daysLeft}d` : "—"}</div>
+                          </div>
+
+                          {/* Status */}
+                          <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
+                            <div style={{
+                              fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4,
+                            }}>Status</div>
+                            <div style={{
+                              fontSize: 13, fontWeight: 600,
+                              color: isAck ? "#15803d" : "#f59e0b",
+                            }}>{isAck ? "✓ Done" : "Pending"}</div>
+                          </div>
                         </div>
 
                         <div style={{ display: "flex", gap: 8 }} onClick={e => e.stopPropagation()}>

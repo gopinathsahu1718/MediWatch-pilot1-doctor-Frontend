@@ -272,11 +272,25 @@ useEffect(() => {
                       <Smartphone size={16} />
                     </span>
                     <input
-                      type="tel" placeholder="+91 98765 43210" value={phone}
-                      onChange={e => setPhone(e.target.value)} required style={inputStyle}
-                      onFocus={e => { e.target.style.borderColor = "#378ADD"; e.target.style.boxShadow = "0 0 0 4px rgba(55,138,221,0.15)"; }}
-                      onBlur={e => { e.target.style.borderColor = "#e2e8f0"; e.target.style.boxShadow = "none"; }}
-                    />
+  type="tel"
+  placeholder="+91 98765 43210"
+  value={phone}
+  maxLength={10}
+  onChange={(e) => {
+    const value = e.target.value.replace(/\D/g, "").slice(0, 10);
+    setPhone(value);
+  }}
+  required
+  style={inputStyle}
+  onFocus={(e) => {
+    e.target.style.borderColor = "#378ADD";
+    e.target.style.boxShadow = "0 0 0 4px rgba(55,138,221,0.15)";
+  }}
+  onBlur={(e) => {
+    e.target.style.borderColor = "#e2e8f0";
+    e.target.style.boxShadow = "none";
+  }}
+/>
                   </div>
                 </div>
 

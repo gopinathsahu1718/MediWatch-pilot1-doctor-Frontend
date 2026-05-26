@@ -4,13 +4,14 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import {
   Search, Users, Activity, PauseCircle, CheckCircle2,
-  Clock, UserX, SlidersHorizontal,
+  Clock, UserX, SlidersHorizontal, ChevronDown, X, ArrowUpDown,
 } from "lucide-react";
 import Link from "next/link";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ApiStatus = "active" | "inactive" | "completed" | "incomplete" | "pending_login";
+type SortOption = "none" | "az" | "za" | "risk_high" | "risk_low";
 
 interface ApiPatient {
   id: string;
@@ -63,11 +64,39 @@ const STATUS_META: Record<ApiStatus, { label: string; bg: string; color: string 
   pending_login: { label: "Pending Login", bg: "#f5f3ff", color: "#7c3aed" },
 };
 
-const RISK_META: Record<string, { label: string; color: string; bg: string }> = {
-  high:   { label: "High",   color: "#dc2626", bg: "#fee2e2" },
-  medium: { label: "Medium", color: "#a16207", bg: "#fef9c3" },
-  low:    { label: "Low",    color: "#15803d", bg: "#dcfce7" },
+const RISK_META: Record<string, { label: string; color: string; bg: string; weight: number }> = {
+  high:   { label: "High",   color: "#dc2626", bg: "#fee2e2", weight: 3 },
+  medium: { label: "Medium", color: "#a16207", bg: "#fef9c3", weight: 2 },
+  low:    { label: "Low",    color: "#15803d", bg: "#dcfce7", weight: 1 },
 };
+
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: "none",      label: "Default order" },
+  { value: "az",        label: "Name: A → Z" },
+  { value: "za",        label: "Name: Z → A" },
+  { value: "risk_high", label: "Risk: High first" },
+  { value: "risk_low",  label: "Risk: Low first" },
+];
+
+const STATUS_FILTERS = [
+  { value: "all",           label: "All Statuses" },
+  { value: "active",        label: "Active" },
+  { value: "inactive",      label: "Inactive" },
+  { value: "completed",     label: "Completed" },
+  { value: "incomplete",    label: "Incomplete" },
+  { value: "pending_login", label: "Pending Login" },
+];
+
+function sortPatients(patients: ApiPatient[], sort: SortOption): ApiPatient[] {
+  if (sort === "none") return patients;
+  return [...patients].sort((a, b) => {
+    if (sort === "az") return a.name.localeCompare(b.name);
+    if (sort === "za") return b.name.localeCompare(a.name);
+    const wa = RISK_META[a.risk_category]?.weight ?? 0;
+    const wb = RISK_META[b.risk_category]?.weight ?? 0;
+    return sort === "risk_high" ? wb - wa : wa - wb;
+  });
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -76,6 +105,7 @@ export default function PatientsPage() {
 
   const [search,       setSearch]       = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [sortOption,   setSortOption]   = useState<SortOption>("none");
   const [page,         setPage]         = useState(1);
   const LIMIT = 20;
 
@@ -85,10 +115,22 @@ export default function PatientsPage() {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
 
+  // Filter dropdown state
   const [filterOpen, setFilterOpen] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
+        setFilterOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
-  // routerRef avoids adding router to deps (router identity changes on navigation)
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
 
@@ -130,11 +172,10 @@ export default function PatientsPage() {
     }
   }
 
-  // Only re-fetch when search/filter/page actually changes — no fetchPatients in deps
   useEffect(() => {
     const t = setTimeout(() => {
       fetchPatients(search, statusFilter, page);
-    }, search ? 400 : 0); // debounce only for search typing, instant for filter/page
+    }, search ? 400 : 0);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, statusFilter, page]);
@@ -142,6 +183,18 @@ export default function PatientsPage() {
   const handleSearch = (v: string) => { setSearch(v);       setPage(1); };
   const handleStatus = (v: string) => { setStatusFilter(v); setPage(1); };
 
+  // Derived sorted list
+  const displayedPatients = sortPatients(patients, sortOption);
+
+  // ── Computed filter label ──────────────────────────────────────────────────
+  const hasFilters = statusFilter !== "all" || sortOption !== "none";
+  const filterBadgeCount = (statusFilter !== "all" ? 1 : 0) + (sortOption !== "none" ? 1 : 0);
+
+  function clearAllFilters() {
+    setStatusFilter("all");
+    setSortOption("none");
+    setPage(1);
+  }
 
   // ── Pagination ─────────────────────────────────────────────────────────────
   const totalPages = pagination?.totalPages ?? 1;
@@ -157,18 +210,7 @@ export default function PatientsPage() {
 
   const n = (v: string | number | undefined) => Number(v ?? 0);
 
-  const STATUS_FILTERS = [
-    { value: "all",           label: "All" },
-    { value: "active",        label: "Active" },
-    { value: "inactive",      label: "Inactive" },
-    { value: "completed",     label: "Completed" },
-    { value: "incomplete",    label: "Incomplete" },
-    { value: "pending_login", label: "Pending Login" },
-  ];
-
-  const COL_HEADERS = [
-    "Patient", "Disease", "Risk", "Status", "Monitoring", "Registered", "",
-  ];
+  const COL_HEADERS = ["Patient", "Disease", "Risk", "Status", "Monitoring", "Registered", "Action"];
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -176,7 +218,7 @@ export default function PatientsPage() {
       <Sidebar />
       <main className="main-content">
 
-        {/* ── Page Header — with total patients on the right ── */}
+        {/* ── Page Header ── */}
         <div style={{
           background: "#378ADD",
           padding: "20px 24px", borderRadius: 16, marginBottom: 28,
@@ -190,17 +232,14 @@ export default function PatientsPage() {
               Complete patient registry across all statuses
             </p>
           </div>
-
-          {/* Total patients pill — top-right of header */}
           <div style={{
             display: "flex", alignItems: "center", gap: 12,
             background: "rgba(255,255,255,0.15)",
             border: "1.5px solid rgba(255,255,255,0.25)",
-            borderRadius: 16, padding: "12px 20px",
-            flexShrink: 0,
+            borderRadius: 16, padding: "12px 20px", flexShrink: 0,
           }}>
             <Users size={22} color="white" />
-            <div style={{ textAlign: "right" }}>
+            <div style={{ textAlign: "center" }}>
               <div className="heading-font" style={{ fontSize: 28, fontWeight: 800, color: "white", lineHeight: 1 }}>
                 {loading ? "—" : n(stats?.total)}
               </div>
@@ -259,7 +298,8 @@ export default function PatientsPage() {
         )}
 
         {/* ── Search + Filter bar ── */}
-        <div className="dashboard-search-bar" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
+          {/* Search input */}
           <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
             <span style={{
               position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)",
@@ -269,75 +309,209 @@ export default function PatientsPage() {
             </span>
             <input
               className="mw-input"
-              style={{ paddingLeft: 44 }}
+              style={{ paddingLeft: 44, width: "100%", boxSizing: "border-box" }}
               placeholder="Search by name or phone…"
               value={search}
               onChange={e => handleSearch(e.target.value)}
             />
           </div>
 
-          {/* Desktop filter chips */}
-          <div className="filter-chips-desktop" style={{ flexWrap: "wrap" }}>
-            {STATUS_FILTERS.map(f => (
-              <button
-                key={f.value}
-                onClick={() => handleStatus(f.value)}
-                style={{
-                  padding: "10px 16px", borderRadius: 12, border: "1.5px solid",
-                  borderColor: statusFilter === f.value ? "#1D9E75" : "#e2e8f0",
-                  background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "white",
-                  color: statusFilter === f.value ? "#1D9E75" : "#64748b",
-                  fontWeight: 600, fontSize: 12, cursor: "pointer",
-                  transition: "all 0.2s", whiteSpace: "nowrap",
-                }}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+          {/* Filter button + dropdown */}
+          <div ref={filterRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              onClick={() => setFilterOpen(v => !v)}
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "11px 18px", borderRadius: 14,
+                border: "1.5px solid",
+                borderColor: hasFilters ? "#1D9E75" : "#e2e8f0",
+                background: hasFilters ? "rgba(29,158,117,0.07)" : "white",
+                color: hasFilters ? "#1D9E75" : "#374151",
+                fontWeight: 600, fontSize: 13, cursor: "pointer",
+                transition: "all 0.18s",
+                boxShadow: filterOpen ? "0 0 0 3px rgba(29,158,117,0.15)" : "none",
+              }}
+            >
+              <SlidersHorizontal size={15} />
+              <span>Filter</span>
+              {filterBadgeCount > 0 && (
+                <span style={{
+                  background: "#1D9E75", color: "white",
+                  borderRadius: 99, fontSize: 10, fontWeight: 800,
+                  width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
+                  marginLeft: -2,
+                }}>
+                  {filterBadgeCount}
+                </span>
+              )}
+              <ChevronDown
+                size={14}
+                style={{ marginLeft: -2, transition: "transform 0.2s", transform: filterOpen ? "rotate(180deg)" : "none" }}
+              />
+            </button>
 
-          {/* Mobile filter toggle – hidden on tablet/desktop via globals, shown only on mobile */}
-          <button
-            className="filter-toggle-mobile"
-            onClick={() => setFilterOpen(v => !v)}
-            style={{
-              display: "flex", alignItems: "center", gap: 6,
-              padding: "12px 16px", borderRadius: 14, border: "1.5px solid",
-              borderColor: statusFilter !== "all" ? "#1D9E75" : "#e2e8f0",
-              background: statusFilter !== "all" ? "rgba(29,158,117,0.08)" : "white",
-              color: statusFilter !== "all" ? "#1D9E75" : "#64748b",
-              fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0,
-            }}
-          >
-            <SlidersHorizontal size={15} />
-            {statusFilter !== "all"
-              ? STATUS_FILTERS.find(f => f.value === statusFilter)?.label ?? "Filter"
-              : "Filter"}
-          </button>
+            {/* Dropdown panel */}
+            {filterOpen && (
+              <div style={{
+                position: "absolute", top: "calc(100% + 8px)", right: 0,
+                background: "white", borderRadius: 18,
+                boxShadow: "0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(142, 27, 27, 0.06), inset 0 1px 2px rgba(255,255,255,0.8), inset 0 -2px 4px rgba(0,0,0,0.03)",
+                border: "1px solid #e2e8f0",
+                zIndex: 100, minWidth: 260, maxHeight: 320, overflowY: "auto",
+                animation: "dropIn 0.18s ease",
+              }}>
+                {/* Status section */}
+                <div style={{ padding: "16px 16px 12px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Status
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    {STATUS_FILTERS.map(f => (
+                      <button
+                        key={f.value}
+                        onClick={() => { handleStatus(f.value); }}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "9px 12px", borderRadius: 10, border: "none",
+                          background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "transparent",
+                          color: statusFilter === f.value ? "#1D9E75" : "#374151",
+                          fontWeight: statusFilter === f.value ? 700 : 500,
+                          fontSize: 13, cursor: "pointer", textAlign: "left",
+                          transition: "background 0.15s",
+                          width: "100%",
+                        }}
+                        onMouseEnter={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
+                        }}
+                        onMouseLeave={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                        }}
+                      >
+                        <span>{f.label}</span>
+                        {statusFilter === f.value && (
+                          <span style={{
+                            width: 8, height: 8, borderRadius: "50%",
+                            background: "#1D9E75", flexShrink: 0,
+                          }} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
+
+                {/* Sort section */}
+                <div style={{ padding: "12px 16px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    <ArrowUpDown size={11} />
+                    Sort
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    {SORT_OPTIONS.map(s => (
+                      <button
+                        key={s.value}
+                        onClick={() => setSortOption(s.value)}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "9px 12px", borderRadius: 10, border: "none",
+                          background: sortOption === s.value ? "rgba(55,138,221,0.08)" : "transparent",
+                          color: sortOption === s.value ? "#378ADD" : "#374151",
+                          fontWeight: sortOption === s.value ? 700 : 500,
+                          fontSize: 13, cursor: "pointer", textAlign: "left",
+                          transition: "background 0.15s", width: "100%",
+                        }}
+                        onMouseEnter={e => {
+                          if (sortOption !== s.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
+                        }}
+                        onMouseLeave={e => {
+                          if (sortOption !== s.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                        }}
+                      >
+                        <span>{s.label}</span>
+                        {sortOption === s.value && (
+                          <span style={{
+                            width: 8, height: 8, borderRadius: "50%",
+                            background: "#378ADD", flexShrink: 0,
+                          }} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Footer — clear all */}
+                {hasFilters && (
+                  <>
+                    <div style={{ height: 1, background: "#f1f5f9" }} />
+                    <div style={{ padding: "10px 16px" }}>
+                      <button
+                        onClick={() => { clearAllFilters(); setFilterOpen(false); }}
+                        style={{
+                          width: "100%", padding: "9px", borderRadius: 10,
+                          border: "1.5px solid #fca5a5", background: "#fef2f2",
+                          color: "#dc2626", fontSize: 12, fontWeight: 700,
+                          cursor: "pointer", display: "flex", alignItems: "center",
+                          justifyContent: "center", gap: 6,
+                        }}
+                      >
+                        <X size={13} /> Clear all filters
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Mobile filter drawer */}
-        {filterOpen && (
-          <div style={{
-            display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16,
-            padding: "14px 16px", background: "white",
-            borderRadius: 16, boxShadow: "0 4px 20px rgba(0,0,0,0.08)",
-          }}>
-            {STATUS_FILTERS.map(f => (
-              <button
-                key={f.value}
-                onClick={() => { handleStatus(f.value); setFilterOpen(false); }}
-                style={{
-                  padding: "9px 16px", borderRadius: 99, border: "1.5px solid",
-                  borderColor: statusFilter === f.value ? "#1D9E75" : "#e2e8f0",
-                  background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "#f8fafc",
-                  color: statusFilter === f.value ? "#1D9E75" : "#64748b",
-                  fontWeight: 600, fontSize: 12, cursor: "pointer",
-                }}
-              >
-                {f.label}
-              </button>
-            ))}
+        {/* Active filter chips (pill summary) */}
+        {hasFilters && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            {statusFilter !== "all" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(29,158,117,0.1)", border: "1px solid rgba(29,158,117,0.25)",
+                color: "#1D9E75", fontSize: 12, fontWeight: 600,
+              }}>
+                Status: {STATUS_FILTERS.find(f => f.value === statusFilter)?.label}
+                <button
+                  onClick={() => handleStatus("all")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#1D9E75" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {sortOption !== "none" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(55,138,221,0.1)", border: "1px solid rgba(55,138,221,0.25)",
+                color: "#378ADD", fontSize: 12, fontWeight: 600,
+              }}>
+                Sort: {SORT_OPTIONS.find(s => s.value === sortOption)?.label}
+                <button
+                  onClick={() => setSortOption("none")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#378ADD" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
           </div>
         )}
 
@@ -379,7 +553,7 @@ export default function PatientsPage() {
           )}
 
           {/* Patient rows */}
-          {!loading && patients.map(p => {
+          {!loading && displayedPatients.map(p => {
             const sm = STATUS_META[p.status] ?? STATUS_META.inactive;
             const rm = RISK_META[p.risk_category] ?? RISK_META.low;
             const initials = p.name.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase();
@@ -393,7 +567,7 @@ export default function PatientsPage() {
                     padding: "14px 24px", borderBottom: "1px solid #f1f5f9",
                     alignItems: "center", cursor: "pointer", transition: "background 0.15s",
                   }}
-                  onClick={() => router.push(``)}
+                  onClick={() => router.push(`#`)}
                   onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                   onMouseLeave={e => (e.currentTarget.style.background = "white")}
                 >
@@ -419,16 +593,26 @@ export default function PatientsPage() {
                     )}
                   </div>
                   <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.created_at)}</div>
-                  <div>
-                    <Link href={``}>
-                      <button
-                        onClick={e => e.stopPropagation()}
-                        style={{
-                          padding: "6px 14px", borderRadius: 10,
-                          border: "1.5px solid #378ADD", color: "#378ADD",
-                          background: "transparent", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  {/* Action column */}
+                  <div onClick={e => e.stopPropagation()}>
+                    <Link href={`#`}>
+                      <button style={{
+                        padding: "6px 16px", borderRadius: 10,
+                        border: "1.5px solid #378ADD", color: "#378ADD",
+                        background: "transparent", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                        transition: "all 0.15s",
+                      }}
+                        onMouseEnter={e => {
+                          (e.currentTarget as HTMLButtonElement).style.background = "#378ADD";
+                          (e.currentTarget as HTMLButtonElement).style.color = "white";
                         }}
-                      >View</button>
+                        onMouseLeave={e => {
+                          (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                          (e.currentTarget as HTMLButtonElement).style.color = "#378ADD";
+                        }}
+                      >
+                        View
+                      </button>
                     </Link>
                   </div>
                 </div>
@@ -486,13 +670,13 @@ export default function PatientsPage() {
           })}
 
           {/* Empty state */}
-          {!loading && patients.length === 0 && (
+          {!loading && displayedPatients.length === 0 && (
             <div style={{ padding: "56px 24px", textAlign: "center" }}>
               <Users size={40} style={{ color: "#e2e8f0", marginBottom: 12 }} />
               <div style={{ color: "#94a3b8", fontWeight: 500 }}>No patients found</div>
               {(search || statusFilter !== "all") && (
                 <button
-                  onClick={() => { setSearch(""); setStatusFilter("all"); setPage(1); }}
+                  onClick={() => { setSearch(""); clearAllFilters(); }}
                   style={{
                     marginTop: 12, padding: "8px 20px", borderRadius: 10,
                     border: "1.5px solid #e2e8f0", background: "white",
@@ -504,7 +688,7 @@ export default function PatientsPage() {
           )}
 
           {/* Pagination */}
-          {!loading && patients.length > 0 && pagination && (
+          {!loading && displayedPatients.length > 0 && pagination && (
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
               padding: "16px 24px", borderTop: "1px solid #f1f5f9",
@@ -569,6 +753,23 @@ export default function PatientsPage() {
 
         {/* Responsive styles */}
         <style>{`
+          @keyframes dropIn {
+            from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+            to   { opacity: 1; transform: translateY(0)   scale(1); }
+          }
+          div[style*="maxHeight: 320px"]::-webkit-scrollbar {
+            width: 6px;
+          }
+          div[style*="maxHeight: 320px"]::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          div[style*="maxHeight: 320px"]::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+          }
+          div[style*="maxHeight: 320px"]::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+          }
           .patients-grid {
             display: grid;
             gap: 16px;
@@ -579,11 +780,6 @@ export default function PatientsPage() {
             display: grid;
             gap: 16px;
             grid-template-columns: repeat(5, minmax(0,1fr));
-          }
-          /* Ensure filter chips visible on tablet, toggle button hidden */
-          @media (min-width:768px) {
-            .filter-chips-desktop { display: flex !important; }
-            .filter-toggle-mobile { display: none !important; }
           }
           @media (min-width:1024px) and (max-width:1300px) {
             .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.75fr 70px; gap: 12px; }
