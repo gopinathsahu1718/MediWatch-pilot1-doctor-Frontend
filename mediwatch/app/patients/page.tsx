@@ -595,7 +595,7 @@ export default function PatientsPage() {
                   <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.created_at)}</div>
                   {/* Action column */}
                   <div onClick={e => e.stopPropagation()}>
-                    <Link href={`#`}>
+                    <Link href={`/IDpatient/${p.id}`}>
                       <button style={{
                         padding: "6px 16px", borderRadius: 10,
                         border: "1.5px solid #378ADD", color: "#378ADD",
@@ -659,7 +659,7 @@ export default function PatientsPage() {
                       <div style={{ fontSize: 12, color: "#94a3b8" }}>
                         Registered: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.created_at)}</span>
                       </div>
-                      <Link href={`#`}>
+                      <Link href={`/IDpatient/${p.id}`}>
                         <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>View</button>
                       </Link>
                     </div>
