@@ -1,12 +1,13 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FileText, User, LogOut, Home, Menu, X, ChevronLeft, ChevronRight, Users } from "lucide-react";
+import { FileText, User, LogOut, Home, Menu, X, ChevronLeft, ChevronRight, Users, CheckCircle2 } from "lucide-react";
 import { useState, useEffect } from "react";
 
 const navItems = [
   { href: "/dashboard",  label: "Dashboard",         icon: Home     },
-  { href: "/patients",   label: "All Patients",       icon: Users    },
+  { href: "/patients",   label: "All Patients",      icon: Users    },
+  { href: "/resolved-patients", label: "Resolved Patients", icon: CheckCircle2    },
   { href: "/register",   label: "Registration Form",  icon: FileText },
   { href: "/profile",    label: "Profile",            icon: User     },
 ];

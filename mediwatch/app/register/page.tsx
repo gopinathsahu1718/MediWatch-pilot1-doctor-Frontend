@@ -159,11 +159,12 @@ export default function RegisterPage() {
         return;
       }
 
-      // Use API-returned patient ID if available, else generate display ID
+      // Use API-returned readable ID if available, else fallback to patient ID or generated display ID
       const returnedId =
+        data?.data?.readable_id ||
+        data?.data?.readableId ||
         data?.data?.patientId ||
         data?.data?.id ||
-        data?.data?.patient?.id ||
         "MW-" + Math.floor(100000 + Math.random() * 900000);
 
       setPatientId(returnedId);

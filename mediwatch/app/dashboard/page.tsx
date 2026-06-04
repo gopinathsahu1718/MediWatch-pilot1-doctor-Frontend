@@ -1,5 +1,5 @@
 ﻿"use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import {
@@ -167,6 +167,30 @@ const CATEGORY_ICONS: Record<ResolutionCategory, string> = {
   "hospital visit recommended": "🏥",
 };
 
+// ─── Disease Score Color Helper ────────────────────────────────────────────
+
+interface ScoreColor {
+  color: string;
+  background: string;
+}
+
+const getScoreColor = (score: number | undefined): ScoreColor => {
+  if (score === undefined || score === null) {
+    return { color: "#cbd5e1", background: "#f8fafc" };
+  }
+  
+  if (score < 4) {
+    // 1-3.9: Green
+    return { color: "#15803d", background: "#dcfce7" };
+  } else if (score < 6) {
+    // 4-5.9: Yellow
+    return { color: "#a16207", background: "#fef9c3" };
+  } else {
+    // 6-10: Red
+    return { color: "#dc2626", background: "#fee2e2" };
+  }
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -183,6 +207,25 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [resolveModal, setResolveModal] = useState<ResolveModalState | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "ack" | "in_progress">("all");
+  const filterRef = useRef<HTMLDivElement>(null);
+
+  // ── Handle click outside filter dropdown ────────────────────────────────────
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (filterRef.current && !filterRef.current.contains(event.target as Node)) {
+        setFilterOpen(false);
+      }
+    };
+
+    if (filterOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [filterOpen]);
 
   // ── Fetch dashboard ───────────────────────────────────────────────────────
 
@@ -223,10 +266,10 @@ export default function DashboardPage() {
         alertMap[a.alertId] = a;
       });
 
-      // Only red trend patients
+      // Only red trend patients that are not already resolved
       const list: ApiPatient[] = Array.isArray(data?.activePatients) ? data.activePatients : [];
       const red = list
-        .filter(p => p.trend_status === "red")
+        .filter(p => p.trend_status === "red" && (p.triage_status ?? "ack") !== "resolved")
         .map(p => normalisePatient(p, alertMap));
 
       setRedPatients(prev => {
@@ -331,30 +374,6 @@ export default function DashboardPage() {
     );
 
     try {
-      // Step 1: Resolve the alert
-      if (resolveModal.alertId) {
-        const resolveRes = await fetch(
-          `https://api.mediwatch.in/api/v1/doctor/alerts/${resolveModal.alertId}/resolve`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${getToken()}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              resolutionCategory: resolveModal.category,
-              resolutionNote: resolveModal.note.trim(),
-            }),
-          }
-        );
-
-        if (!resolveRes.ok) {
-          const errBody = await resolveRes.json().catch(() => ({}));
-          throw new Error(errBody?.message ?? `Failed to resolve alert (${resolveRes.status})`);
-        }
-      }
-
-      // Step 2: Update triage status to resolved
       const triageRes = await fetch(
         `https://api.mediwatch.in/api/v1/doctor/patients/${resolveModal.patientId}/triage`,
         {
@@ -363,11 +382,18 @@ export default function DashboardPage() {
             Authorization: `Bearer ${getToken()}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ triageStatus: "resolved" }),
+          body: JSON.stringify({
+            triageStatus: "resolved",
+            resolutionCategory: CATEGORY_LABELS[resolveModal.category],
+            resolutionNote: resolveModal.note.trim(),
+          }),
         }
       );
 
-      if (!triageRes.ok) throw new Error(`Failed to update triage status (${triageRes.status})`);
+      if (!triageRes.ok) {
+        const errBody = await triageRes.json().catch(() => ({}));
+        throw new Error(errBody?.message ?? `Failed to resolve patient (${triageRes.status})`);
+      }
 
       setRedPatients(prev =>
         prev.map(p =>
@@ -389,9 +415,13 @@ export default function DashboardPage() {
   };
 
   // ── Pagination ────────────────────────────────────────────────────────────
-  const totalPages = Math.max(1, Math.ceil(redPatients.length / PAGE_SIZE));
+  const filteredPatients = statusFilter === "all"
+    ? redPatients
+    : redPatients.filter(p => p.lifecycleStatus === statusFilter);
+  
+  const totalPages = Math.max(1, Math.ceil(filteredPatients.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPages);
-  const paginated = redPatients.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const paginated = filteredPatients.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const getPageNumbers = (): (number | "…")[] => {
     if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
@@ -440,10 +470,10 @@ export default function DashboardPage() {
           }
           .patient-row-ack:hover { background: #fafafa; }
           .patient-row-inprogress {
-            background: #f8fffe;
+            background: #fffef0;
             transition: background 0.15s;
           }
-          .patient-row-inprogress:hover { background: #f0fdf9; }
+          .patient-row-inprogress:hover { background: #fef9e7; }
           .patient-row-resolved {
             background: #f8fafc;
             opacity: 0.7;
@@ -595,7 +625,7 @@ export default function DashboardPage() {
           </div>
 
           {/* Search bar */}
-          <div className="dashboard-search-bar" style={{ marginBottom: 20 }}>
+          <div className="dashboard-search-bar" style={{ marginBottom: 20, display: "flex", gap: 12, alignItems: "center" }}>
             <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
               <span style={{
                 position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)",
@@ -610,6 +640,103 @@ export default function DashboardPage() {
                 value={search}
                 onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
               />
+            </div>
+
+            {/* Filter Button */}
+            <div style={{ position: "relative" }} ref={filterRef}>
+              <button
+                onClick={() => setFilterOpen(!filterOpen)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "10px 16px",
+                  borderRadius: 12,
+                  border: statusFilter === "all" ? "1.5px solid #e2e8f0" : "1.5px solid #378ADD",
+                  background: statusFilter === "all" ? "white" : "#eff6ff",
+                  color: statusFilter === "all" ? "#374151" : "#378ADD",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                  whiteSpace: "nowrap",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = statusFilter === "all" ? "#cbd5e1" : "#0284c7";
+                  e.currentTarget.style.background = statusFilter === "all" ? "#f8fafc" : "#e0f2fe";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = statusFilter === "all" ? "#e2e8f0" : "#378ADD";
+                  e.currentTarget.style.background = statusFilter === "all" ? "white" : "#eff6ff";
+                }}
+              >
+                <SlidersHorizontal size={16} />
+                {statusFilter === "all" ? "Filter" : statusFilter === "ack" ? "Pending" : "In Review"}
+              </button>
+
+              {/* Dropdown Menu */}
+              {filterOpen && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "100%",
+                    right: 0,
+                    marginTop: 8,
+                    background: "white",
+                    border: "1.5px solid #e2e8f0",
+                    borderRadius: 12,
+                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.1)",
+                    minWidth: 200,
+                    zIndex: 10,
+                  }}
+                >
+                  {[
+                    { value: "all" as const, label: "All Patients", color: "#374151" },
+                    { value: "ack" as const, label: "Pending", color: "#dc2626" },
+                    { value: "in_progress" as const, label: "In Review", color: "#a16207" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => {
+                        setStatusFilter(option.value);
+                        setFilterOpen(false);
+                        setCurrentPage(1);
+                      }}
+                      style={{
+                        width: "100%",
+                        padding: "12px 16px",
+                        border: "none",
+                        background: statusFilter === option.value ? "#f0fdf4" : "white",
+                        color: statusFilter === option.value ? "#15803d" : option.color,
+                        fontSize: 13,
+                        fontWeight: 600,
+                        textAlign: "left",
+                        cursor: "pointer",
+                        transition: "all 0.15s",
+                        borderBottom: option.value !== "in_progress" ? "1px solid #f1f5f9" : "none",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (statusFilter !== option.value) {
+                          e.currentTarget.style.background = "#f8fafc";
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = statusFilter === option.value ? "#f0fdf4" : "white";
+                      }}
+                    >
+                      {statusFilter === option.value && (
+                        <span style={{ display: "inline-flex", alignItems: "center" }}>
+                          <CheckCircle size={14} />
+                        </span>
+                      )}
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -662,8 +789,9 @@ export default function DashboardPage() {
               ? "patient-row-inprogress"
               : "patient-row-ack";
 
-            const scoreBg    = isResolved ? "#f1f5f9" : isInProgress ? "#f0fdf4" : "#fee2e2";
-            const scoreColor = isResolved ? "#94a3b8" : isInProgress ? "#15803d" : "#dc2626";
+            const scoreColorObj = getScoreColor(p.diseaseScore);
+            const scoreBg    = scoreColorObj.background;
+            const scoreColor = scoreColorObj.color;
 
             return (
               <div key={p.id}>
@@ -747,7 +875,7 @@ export default function DashboardPage() {
                       <span style={{
                         display: "inline-flex", alignItems: "center", gap: 5,
                         padding: "4px 10px", borderRadius: 99,
-                        background: "#dcfce7", color: "#15803d",
+                        background: "#fef9e7", color: "#a16207",
                         fontSize: 11, fontWeight: 700,
                       }}>
                         <CheckCircle size={12} /> In Review
@@ -817,9 +945,9 @@ export default function DashboardPage() {
                         onClick={() => openResolveModal(p)}
                         style={{
                           padding: "6px 12px", borderRadius: 10,
-                          border: "1.5px solid #1D9E75",
+                          border: "1.5px solid #a16207",
                           color: "white",
-                          background: p.isResolving ? "#94a3b8" : "#1D9E75",
+                          background: p.isResolving ? "#94a3b8" : "#a16207",
                           fontSize: 12, fontWeight: 600,
                           cursor: p.isResolving ? "not-allowed" : "pointer",
                           transition: "all 0.2s",
@@ -859,7 +987,7 @@ export default function DashboardPage() {
                   <div style={{
                     position: "absolute", left: 0, top: 0, bottom: 0, width: 4,
                     borderRadius: "0 4px 4px 0",
-                    background: isResolved ? "#94a3b8" : isInProgress ? "#1D9E75" : "#dc2626",
+                    background: isResolved ? "#94a3b8" : isInProgress ? "#a16207" : "#dc2626",
                   }} />
                   <div style={{ paddingLeft: 12 }}>
                     {/* Header */}
@@ -882,7 +1010,7 @@ export default function DashboardPage() {
                       {isResolved ? (
                         <span style={{ padding: "3px 8px", borderRadius: 99, background: "#f1f5f9", color: "#64748b", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Resolved</span>
                       ) : isInProgress ? (
-                        <span style={{ padding: "3px 8px", borderRadius: 99, background: "#dcfce7", color: "#15803d", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>In Review</span>
+                        <span style={{ padding: "3px 8px", borderRadius: 99, background: "#fef9e7", color: "#a16207", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>In Review</span>
                       ) : (
                         <span style={{ padding: "3px 8px", borderRadius: 99, background: "#fee2e2", color: "#dc2626", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Pending</span>
                       )}
@@ -890,13 +1018,13 @@ export default function DashboardPage() {
 
                     {/* Reason */}
                     <div style={{
-                      background: isResolved ? "#f8fafc" : isInProgress ? "#f0fdf4" : "#fff5f5",
+                      background: isResolved ? "#f8fafc" : isInProgress ? "#fffef0" : "#fff5f5",
                       borderRadius: 10, padding: "10px 12px", marginBottom: 12,
-                      border: `1px solid ${isResolved ? "#e2e8f0" : isInProgress ? "#bbf7d0" : "#fca5a5"}`,
+                      border: `1px solid ${isResolved ? "#e2e8f0" : isInProgress ? "#fde68a" : "#fca5a5"}`,
                     }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, marginBottom: 4,
-                        color: isResolved ? "#94a3b8" : isInProgress ? "#15803d" : "#b91c1c",
+                        color: isResolved ? "#94a3b8" : isInProgress ? "#a16207" : "#b91c1c",
                         textTransform: "uppercase", letterSpacing: "0.06em",
                       }}>Alert Reason</div>
                       <div style={{ fontSize: 13, fontWeight: 500, color: isResolved ? "#94a3b8" : isInProgress ? "#374151" : "#7f1d1d", lineHeight: "1.5" }}>
@@ -959,7 +1087,7 @@ export default function DashboardPage() {
                           onClick={() => openResolveModal(p)}
                           style={{
                             flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
-                            background: p.isResolving ? "#f1f5f9" : "#1D9E75",
+                            background: p.isResolving ? "#f1f5f9" : "#a16207",
                             color: p.isResolving ? "#94a3b8" : "white",
                             fontSize: 13, fontWeight: 700,
                             cursor: p.isResolving ? "not-allowed" : "pointer",
@@ -988,14 +1116,16 @@ export default function DashboardPage() {
             );
           })}
 
-          {!loading && redPatients.length === 0 && (
+          {!loading && filteredPatients.length === 0 && (
             <div style={{ padding: "48px", textAlign: "center", color: "#94a3b8" }}>
-              No red alert patients found
+              {redPatients.length === 0 
+                ? "No red alert patients found"
+                : `No ${statusFilter === "ack" ? "pending" : statusFilter === "in_progress" ? "in review" : ""} patients found`}
             </div>
           )}
 
           {/* Pagination */}
-          {!loading && redPatients.length > PAGE_SIZE && (
+          {!loading && filteredPatients.length > PAGE_SIZE && (
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
               padding: "16px 24px", borderTop: "1px solid #fef2f2",
@@ -1004,9 +1134,9 @@ export default function DashboardPage() {
               <div style={{ fontSize: 13, color: "#94a3b8" }}>
                 Showing{" "}
                 <span style={{ fontWeight: 600, color: "#374151" }}>
-                  {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, redPatients.length)}
+                  {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filteredPatients.length)}
                 </span>{" "}
-                of <span style={{ fontWeight: 600, color: "#374151" }}>{redPatients.length}</span> patients
+                of <span style={{ fontWeight: 600, color: "#374151" }}>{filteredPatients.length}</span> patients
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
@@ -1113,7 +1243,7 @@ export default function DashboardPage() {
             position: "fixed", inset: 0,
             background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)",
             display: "flex", alignItems: "center", justifyContent: "center",
-            zIndex: 200, padding: 16,
+            zIndex: 400, padding: 16,
           }}
           onClick={() => { if (!resolveModal.isSubmitting) setResolveModal(null); }}
         >

@@ -3,8 +3,8 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import {
-  Search, Users, Activity, PauseCircle, CheckCircle2,
-  Clock, UserX, SlidersHorizontal, ChevronDown, X, ArrowUpDown,
+  Search, Users, CheckCircle2,
+  SlidersHorizontal, ChevronDown, X, ArrowUpDown,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -13,7 +13,7 @@ import Link from "next/link";
 type ApiStatus = "active" | "inactive" | "completed" | "incomplete" | "pending_login";
 type SortOption = "none" | "az" | "za" | "risk_high" | "risk_low";
 
-interface ApiPatient {
+interface ApiResolvedPatient {
   id: string;
   name: string;
   phone: string;
@@ -26,15 +26,8 @@ interface ApiPatient {
   monitoring_end: string | null;
   disease_name: string;
   day_number: number | null;
-}
-
-interface PatientsStats {
-  active: string | number;
-  inactive: string | number;
-  completed: string | number;
-  incomplete: string | number;
-  pending_login: string | number;
-  total: string | number;
+  triage_status: string;
+  resolved_reason?: string;
 }
 
 interface Pagination {
@@ -87,7 +80,7 @@ const STATUS_FILTERS = [
   { value: "pending_login", label: "Pending Login" },
 ];
 
-function sortPatients(patients: ApiPatient[], sort: SortOption): ApiPatient[] {
+function sortPatients(patients: ApiResolvedPatient[], sort: SortOption): ApiResolvedPatient[] {
   if (sort === "none") return patients;
   return [...patients].sort((a, b) => {
     if (sort === "az") return a.name.localeCompare(b.name);
@@ -100,7 +93,7 @@ function sortPatients(patients: ApiPatient[], sort: SortOption): ApiPatient[] {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function PatientsPage() {
+export default function ResolvedPatientsPage() {
   const router = useRouter();
 
   const [search,       setSearch]       = useState("");
@@ -109,8 +102,7 @@ export default function PatientsPage() {
   const [page,         setPage]         = useState(1);
   const LIMIT = 20;
 
-  const [stats,      setStats]      = useState<PatientsStats | null>(null);
-  const [patients,   setPatients]   = useState<ApiPatient[]>([]);
+  const [patients,   setPatients]   = useState<ApiResolvedPatient[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
@@ -134,37 +126,67 @@ export default function PatientsPage() {
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
 
-  async function fetchPatients(search: string, status: string, page: number) {
+  async function fetchResolvedPatients(search: string, status: string, page: number) {
     setLoading(true);
     setError(null);
     try {
       const token = getToken();
       if (!token) { routerRef.current.replace("/login"); return; }
 
-      const params = new URLSearchParams();
-      if (status !== "all") params.set("status", status);
-      if (search.trim())    params.set("search", search.trim());
-      params.set("page",  String(page));
-      params.set("limit", String(LIMIT));
+      // ── Loop all backend pages, filter resolved client-side ──
+      let allResolved: ApiResolvedPatient[] = [];
+      let currentPage = 1;
+      let totalPages = 1;
 
-      const res = await fetch(
-        `https://api.mediwatch.in/api/v1/doctor/patients?${params}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      do {
+        const params = new URLSearchParams();
+        if (status !== "all") params.set("status", status);
+        if (search.trim())    params.set("search", search.trim());
+        params.set("page", String(currentPage));
+        // No limit param — backend defaults to 20 and ignores overrides
 
-      if (res.status === 401) {
-        localStorage.removeItem("doctor_token");
-        document.cookie = "doctor_token=; path=/; max-age=0; SameSite=Strict";
-        routerRef.current.replace("/login");
-        return;
-      }
-      if (!res.ok) throw new Error(`Server error (${res.status})`);
+        const res = await fetch(
+          `https://api.mediwatch.in/api/v1/doctor/patients?${params}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
 
-      const raw = await res.json();
-      const data = raw?.data;
-      setStats(data?.stats ?? null);
-      setPatients(Array.isArray(data?.patients) ? data.patients : []);
-      setPagination(data?.pagination ?? null);
+        if (res.status === 401) {
+          localStorage.removeItem("doctor_token");
+          document.cookie = "doctor_token=; path=/; max-age=0; SameSite=Strict";
+          routerRef.current.replace("/login");
+          return;
+        }
+        if (!res.ok) throw new Error(`Server error (${res.status})`);
+
+        const raw = await res.json();
+        const data = raw?.data;
+        const batch: ApiResolvedPatient[] = Array.isArray(data?.patients) ? data.patients : [];
+
+        // Filter resolved from each batch as it arrives
+        allResolved = [
+          ...allResolved,
+          ...batch.filter(p => p.triage_status === "resolved"),
+        ];
+
+        // Read totalPages from every response in case total shifts
+        totalPages = data?.pagination?.totalPages ?? 1;
+        currentPage++;
+
+      } while (currentPage <= totalPages);
+
+      // ── Client-side pagination over the fully collected resolved list ──
+      const total = allResolved.length;
+      const start = (page - 1) * LIMIT;
+      const paginated = allResolved.slice(start, start + LIMIT);
+
+      setPatients(paginated);
+      setPagination({
+        total,
+        page,
+        limit: LIMIT,
+        totalPages: Math.max(1, Math.ceil(total / LIMIT)),
+      });
+
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -174,7 +196,7 @@ export default function PatientsPage() {
 
   useEffect(() => {
     const t = setTimeout(() => {
-      fetchPatients(search, statusFilter, page);
+      fetchResolvedPatients(search, statusFilter, page);
     }, search ? 400 : 0);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -208,9 +230,7 @@ export default function PatientsPage() {
     return pages;
   };
 
-  const n = (v: string | number | undefined) => Number(v ?? 0);
-
-  const COL_HEADERS = ["Patient", "Disease", "Risk", "Status", "Monitoring", "Registered", "Action"];
+  const COL_HEADERS = ["Patient", "Disease", "Risk", "Status", "Triage Status", "Monitoring", "Registered", "Action"];
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -220,16 +240,16 @@ export default function PatientsPage() {
 
         {/* ── Page Header ── */}
         <div style={{
-          background: "#378ADD",
+          background: "#1D9E75",
           padding: "20px 24px", borderRadius: 16, marginBottom: 28,
           display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
         }}>
           <div>
             <h1 className="heading-font" style={{ fontSize: 28, fontWeight: 800, color: "white", margin: 0 }}>
-              All Patients
+              Resolved Patients
             </h1>
             <p style={{ color: "rgba(255,255,255,0.8)", fontSize: 14, marginTop: 4, marginBottom: 0 }}>
-              Complete patient registry across all statuses
+              Patients with resolved triage status
             </p>
           </div>
           <div style={{
@@ -238,47 +258,16 @@ export default function PatientsPage() {
             border: "1.5px solid rgba(255,255,255,0.25)",
             borderRadius: 16, padding: "12px 20px", flexShrink: 0,
           }}>
-            <Users size={22} color="white" />
+            <CheckCircle2 size={22} color="white" />
             <div style={{ textAlign: "center" }}>
               <div className="heading-font" style={{ fontSize: 28, fontWeight: 800, color: "white", lineHeight: 1 }}>
-                {loading ? "—" : n(stats?.total)}
+                {loading ? "—" : pagination?.total ?? 0}
               </div>
               <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>
-                Total Patients
+                Resolved Patients
               </div>
             </div>
           </div>
-        </div>
-
-        {/* ── 5 Status Stat Cards ── */}
-        <div className="patients-stat-grid" style={{ marginBottom: 28 }}>
-          {[
-            { key: "active",        label: "Active",        icon: Activity,     color: "#15803d", bg: "#f0fdf4", border: "#15803d22" },
-            { key: "inactive",      label: "Inactive",      icon: PauseCircle,  color: "#a16207", bg: "#fefce8", border: "#a1620722" },
-            { key: "completed",     label: "Completed",     icon: CheckCircle2, color: "#1d4ed8", bg: "#eff6ff", border: "#1d4ed822" },
-            { key: "incomplete",    label: "Incomplete",    icon: UserX,        color: "#dc2626", bg: "#fef2f2", border: "#dc262622" },
-            { key: "pending_login", label: "Pending Login", icon: Clock,        color: "#7c3aed", bg: "#f5f3ff", border: "#7c3aed22" },
-          ].map(card => (
-            <div
-              key={card.key}
-              className="stat-card"
-              style={{
-                background: card.bg, border: `1px solid ${card.border}`,
-                cursor: "pointer",
-                outline: statusFilter === card.key ? `2px solid ${card.color}` : "none",
-                outlineOffset: 2,
-              }}
-              onClick={() => handleStatus(statusFilter === card.key ? "all" : card.key)}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-                <card.icon size={24} color={card.color} />
-                <div className="heading-font" style={{ fontSize: 32, fontWeight: 800, color: card.color }}>
-                  {loading ? "—" : n(stats?.[card.key as keyof PatientsStats])}
-                </div>
-              </div>
-              <div style={{ color: "#64748b", fontSize: 12, fontWeight: 500 }}>{card.label}</div>
-            </div>
-          ))}
         </div>
 
         {/* Error banner */}
@@ -291,7 +280,7 @@ export default function PatientsPage() {
           }}>
             {error}
             <button
-              onClick={() => fetchPatients(search, statusFilter, page)}
+              onClick={() => fetchResolvedPatients(search, statusFilter, page)}
               style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontSize: 13 }}
             >Retry</button>
           </div>
@@ -355,57 +344,11 @@ export default function PatientsPage() {
               <div style={{
                 position: "absolute", top: "calc(100% + 8px)", right: 0,
                 background: "white", borderRadius: 18,
-                boxShadow: "0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(142, 27, 27, 0.06), inset 0 1px 2px rgba(255,255,255,0.8), inset 0 -2px 4px rgba(0,0,0,0.03)",
+                boxShadow: "0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(142,27,27,0.06)",
                 border: "1px solid #e2e8f0",
                 zIndex: 100, minWidth: 260, maxHeight: 320, overflowY: "auto",
                 animation: "dropIn 0.18s ease",
               }}>
-                {/* Status section */}
-                <div style={{ padding: "16px 16px 12px" }}>
-                  <div style={{
-                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
-                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
-                  }}>
-                    Status
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                    {STATUS_FILTERS.map(f => (
-                      <button
-                        key={f.value}
-                        onClick={() => { handleStatus(f.value); }}
-                        style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between",
-                          padding: "9px 12px", borderRadius: 10, border: "none",
-                          background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "transparent",
-                          color: statusFilter === f.value ? "#1D9E75" : "#374151",
-                          fontWeight: statusFilter === f.value ? 700 : 500,
-                          fontSize: 13, cursor: "pointer", textAlign: "left",
-                          transition: "background 0.15s",
-                          width: "100%",
-                        }}
-                        onMouseEnter={e => {
-                          if (statusFilter !== f.value)
-                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
-                        }}
-                        onMouseLeave={e => {
-                          if (statusFilter !== f.value)
-                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
-                        }}
-                      >
-                        <span>{f.label}</span>
-                        {statusFilter === f.value && (
-                          <span style={{
-                            width: 8, height: 8, borderRadius: "50%",
-                            background: "#1D9E75", flexShrink: 0,
-                          }} />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Divider */}
-                <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
 
                 {/* Sort section */}
                 <div style={{ padding: "12px 16px 16px" }}>
@@ -452,6 +395,54 @@ export default function PatientsPage() {
                   </div>
                 </div>
 
+                {/* Status section */}
+                <div style={{ padding: "16px 16px 12px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Status
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    {STATUS_FILTERS.map(f => (
+                      <button
+                        key={f.value}
+                        onClick={() => handleStatus(f.value)}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "9px 12px", borderRadius: 10, border: "none",
+                          background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "transparent",
+                          color: statusFilter === f.value ? "#1D9E75" : "#374151",
+                          fontWeight: statusFilter === f.value ? 700 : 500,
+                          fontSize: 13, cursor: "pointer", textAlign: "left",
+                          transition: "background 0.15s", width: "100%",
+                        }}
+                        onMouseEnter={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
+                        }}
+                        onMouseLeave={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                        }}
+                      >
+                        <span>{f.label}</span>
+                        {statusFilter === f.value && (
+                          <span style={{
+                            width: 8, height: 8, borderRadius: "50%",
+                            background: "#1D9E75", flexShrink: 0,
+                          }} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
+
+                
+
                 {/* Footer — clear all */}
                 {hasFilters && (
                   <>
@@ -477,7 +468,7 @@ export default function PatientsPage() {
           </div>
         </div>
 
-        {/* Active filter chips (pill summary) */}
+        {/* Active filter chips */}
         {hasFilters && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
             {statusFilter !== "all" && (
@@ -547,7 +538,7 @@ export default function PatientsPage() {
                 borderTop: "3px solid #1D9E75", borderRadius: "50%",
                 animation: "spin 0.7s linear infinite", margin: "0 auto 12px",
               }} />
-              Loading patients…
+              Loading resolved patients…
               <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
             </div>
           )}
@@ -586,6 +577,11 @@ export default function PatientsPage() {
                       {sm.label}
                     </span>
                   </div>
+                  <div>
+                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: "#dcfce7", color: "#15803d" }}>
+                      Resolved
+                    </span>
+                  </div>
                   <div style={{ fontSize: 13, color: "#475569" }}>
                     {p.monitoring_days ? `${p.monitoring_days}d` : "—"}
                     {p.day_number !== null && (
@@ -593,15 +589,15 @@ export default function PatientsPage() {
                     )}
                   </div>
                   <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.created_at)}</div>
-                  {/* Action column */}
                   <div onClick={e => e.stopPropagation()}>
                     <Link href={`/IDpatient/${p.id}`}>
-                      <button style={{
-                        padding: "6px 16px", borderRadius: 10,
-                        border: "1.5px solid #378ADD", color: "#378ADD",
-                        background: "transparent", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                        transition: "all 0.15s",
-                      }}
+                      <button
+                        style={{
+                          padding: "6px 16px", borderRadius: 10,
+                          border: "1.5px solid #378ADD", color: "#378ADD",
+                          background: "transparent", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                          transition: "all 0.15s",
+                        }}
                         onMouseEnter={e => {
                           (e.currentTarget as HTMLButtonElement).style.background = "#378ADD";
                           (e.currentTarget as HTMLButtonElement).style.color = "white";
@@ -621,7 +617,7 @@ export default function PatientsPage() {
                 <div
                   className="patient-mobile-card"
                   style={{ display: "none" }}
-                  onClick={() => router.push(`#`)}
+                  onClick={() => router.push(`/IDpatient/${p.id}`)}
                 >
                   <div style={{
                     position: "absolute", left: 0, top: 0, bottom: 0,
@@ -660,7 +656,9 @@ export default function PatientsPage() {
                         Registered: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.created_at)}</span>
                       </div>
                       <Link href={`/IDpatient/${p.id}`}>
-                        <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>View</button>
+                        <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                          View
+                        </button>
                       </Link>
                     </div>
                   </div>
@@ -672,8 +670,8 @@ export default function PatientsPage() {
           {/* Empty state */}
           {!loading && displayedPatients.length === 0 && (
             <div style={{ padding: "56px 24px", textAlign: "center" }}>
-              <Users size={40} style={{ color: "#e2e8f0", marginBottom: 12,margin:"auto" }} />
-              <div style={{ color: "#94a3b8", fontWeight: 500 }}>No patients found</div>
+              <Users size={40} style={{ color: "#e2e8f0", marginBottom: 12, margin: "auto" }} />
+              <div style={{ color: "#94a3b8", fontWeight: 500 }}>No resolved patients found</div>
               {(search || statusFilter !== "all") && (
                 <button
                   onClick={() => { setSearch(""); clearAllFilters(); }}
@@ -682,7 +680,9 @@ export default function PatientsPage() {
                     border: "1.5px solid #e2e8f0", background: "white",
                     color: "#64748b", fontSize: 13, fontWeight: 600, cursor: "pointer",
                   }}
-                >Clear filters</button>
+                >
+                  Clear filters
+                </button>
               )}
             </div>
           )}
@@ -700,9 +700,9 @@ export default function PatientsPage() {
                   {(pagination.page - 1) * pagination.limit + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)}
                 </span>{" "}
                 of{" "}
-                <span style={{ fontWeight: 600, color: "#374151" }}>{pagination.total}</span>{" "}
-                patients
+                <span style={{ fontWeight: 600, color: "#374151" }}>{pagination.total}</span>
               </div>
+
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
                   onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -751,46 +751,24 @@ export default function PatientsPage() {
           )}
         </div>
 
-        {/* Responsive styles */}
         <style>{`
           @keyframes dropIn {
             from { opacity: 0; transform: translateY(-6px) scale(0.98); }
-            to   { opacity: 1; transform: translateY(0)   scale(1); }
-          }
-          div[style*="maxHeight: 320px"]::-webkit-scrollbar {
-            width: 6px;
-          }
-          div[style*="maxHeight: 320px"]::-webkit-scrollbar-track {
-            background: transparent;
-          }
-          div[style*="maxHeight: 320px"]::-webkit-scrollbar-thumb {
-            background: #cbd5e1;
-            border-radius: 3px;
-          }
-          div[style*="maxHeight: 320px"]::-webkit-scrollbar-thumb:hover {
-            background: #94a3b8;
+            to   { opacity: 1; transform: translateY(0) scale(1); }
           }
           .patients-grid {
             display: grid;
             gap: 16px;
             align-items: center;
-            grid-template-columns: minmax(140px,1.8fr) 1.2fr 0.7fr 0.9fr 0.7fr 0.8fr 80px;
-          }
-          .patients-stat-grid {
-            display: grid;
-            gap: 16px;
-            grid-template-columns: repeat(5, minmax(0,1fr));
+            grid-template-columns: minmax(140px,1.8fr) 1.2fr 0.7fr 0.9fr 0.65fr 0.7fr 0.8fr 80px;
           }
           @media (min-width:1024px) and (max-width:1300px) {
-            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.75fr 70px; gap: 12px; }
-            .patients-stat-grid { gap: 12px; }
+            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.6fr 0.75fr 70px; gap: 12px; }
           }
           @media (max-width:1023px) and (min-width:768px) {
-            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.75fr 70px; gap: 10px; }
-            .patients-stat-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
+            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.6fr 0.75fr 70px; gap: 10px; }
           }
           @media (max-width:767px) {
-            .patients-stat-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
             .patient-table-header { display: none !important; }
             .patient-desktop-row  { display: none !important; }
             .patient-mobile-card  {
@@ -798,11 +776,7 @@ export default function PatientsPage() {
               position: relative;
               padding: 16px 16px 16px 20px;
               border-bottom: 1px solid #f1f5f9;
-              cursor: pointer;
-              transition: background 0.15s;
-              background: white;
             }
-            .patient-mobile-card:hover { background: #fafafa; }
           }
         `}</style>
       </main>
