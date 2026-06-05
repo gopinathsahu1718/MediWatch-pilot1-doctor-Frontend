@@ -494,7 +494,7 @@ export default function DashboardPage() {
   };
 
   const pendingCount = redPatients.filter(p => p.lifecycleStatus === "pending").length;
-  const inProgCount = redPatients.filter(p => p.lifecycleStatus === "in_progress").length;
+  const inProgCount = redPatients.filter(p => p.lifecycleStatus === "in_process").length;
   const resolvedCount = redPatients.filter(p => p.lifecycleStatus === "resolved").length;
 
   // ── Render ────────────────────────────────────────────────────────────────
