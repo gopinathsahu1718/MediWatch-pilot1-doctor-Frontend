@@ -78,17 +78,48 @@ interface Question {
   max_value: number;
 }
 
+interface EnrichedAnswer {
+  question_text: string;
+  question_type: string;
+  min_value: number;
+  max_value: number;
+  display_order: number;
+  value: number;
+}
+
+interface EnrichedOverrideAnswer {
+  question_text: string;
+  display_order: number;
+  triggered: boolean;
+}
+
 interface Submission {
   id: string;
   day_number: number;
-  answers: Record<string, number>;
-  override_answers: Record<string, boolean>;
+  answers: Record<string, EnrichedAnswer>;
+  override_answers: Record<string, EnrichedOverrideAnswer>;
   disease_score: number;
   trend_status: string;
   priority_value: number;
   override_triggered: boolean;
   images: string[];
   submitted_at: string;
+}
+
+interface HistoryAlert {
+  id: string;
+  alert_type: "red" | "yellow";
+  alert_status: "pending" | "in_process" | "resolved";
+  created_at: string;
+  resolved_at: string | null;
+  in_process_at: string | null;
+  resolution_note: string | null;
+  resolution_category: string | null;
+  in_process_by_name: string | null;
+  resolved_by_name: string | null;
+  reminder_count: number;
+  escalated: boolean;
+  submission_day_number: number | null;
 }
 
 interface BasdaiPoint {
@@ -457,6 +488,7 @@ export default function PatientDetailPage() {
   const [expandedDay, setExpandedDay] = useState<number | null>(null);
   const [selectedQKey, setSelectedQKey] = useState<string>("");
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
+  const [historyAlerts, setHistoryAlerts] = useState<HistoryAlert[]>([]);
 
 
   const routerRef = useRef(router);
@@ -497,6 +529,7 @@ export default function PatientDetailPage() {
         setSubmissions(h?.submissions ?? []);
         setBasdaiGraph(h?.basdaiGraph ?? []);
         setOverrideGraph(h?.overrideGraph ?? []);
+        setHistoryAlerts(h?.alerts ?? []);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Something went wrong.");
       } finally {
@@ -539,7 +572,7 @@ export default function PatientDetailPage() {
       .map(s => ({
         dayNumber: s.day_number,
         date: s.submitted_at,
-        value: s.answers[selectedQKey] ?? 0,
+        value: s.answers[selectedQKey]?.value ?? 0,
       }))
       .filter(d => d.value !== undefined),
     [submissions, selectedQKey]
@@ -784,9 +817,10 @@ export default function PatientDetailPage() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {questions.map((q, i) => {
-                  const latestAnswer = latestSub
+                  const enrichedAnswer = latestSub
                     ? (submissions.find(s => s.day_number === latestSub.day_number)?.answers[q.question_key] ?? null)
                     : null;
+                  const latestAnswer = enrichedAnswer != null ? enrichedAnswer.value : null;
                   return (
                     <div key={q.question_key} style={{ padding: "10px 12px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: latestAnswer !== null ? 6 : 0 }}>
@@ -1062,33 +1096,44 @@ export default function PatientDetailPage() {
                           <>
                             <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 12 }}>Symptom Answers</div>
                             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-                              {questions.filter(q => sub.answers[q.question_key] !== undefined).map((q, i) => (
-                                <div key={q.question_key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                                  <span style={{ fontSize: 11, fontWeight: 700, color: Q_COLORS[i % Q_COLORS.length], width: 28, flexShrink: 0 }}>{q.question_key.toUpperCase()}</span>
-                                  <span style={{ fontSize: 12, color: "#64748b", flex: 1 }}>{q.question_text.split("(")[0].trim()}</span>
-                                  <div style={{ width: 160, flexShrink: 0 }}><ScoreBar value={sub.answers[q.question_key]} max={q.max_value} /></div>
-                                </div>
-                              ))}
+                              {Object.entries(sub.answers)
+                                .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
+                                .map(([key, ans], i) => (
+                                  <div key={key} style={{ padding: "10px 14px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                                      <div style={{ flex: 1, paddingRight: 10 }}>
+                                        <span style={{ fontSize: 10, fontWeight: 800, color: Q_COLORS[i % Q_COLORS.length], textTransform: "uppercase", letterSpacing: "0.07em" }}>Q{i + 1}</span>
+                                        <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{ans.question_text}</div>
+                                      </div>
+                                      <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: ans.value >= 7 ? "#fee2e2" : ans.value >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                        <span style={{ fontWeight: 800, fontSize: 14, color: ans.value >= 7 ? "#dc2626" : ans.value >= 4 ? "#a16207" : "#15803d" }}>{ans.value}</span>
+                                      </div>
+                                    </div>
+                                    <ScoreBar value={ans.value} max={ans.max_value} />
+                                  </div>
+                                ))}
                             </div>
                           </>
                         )}
                         {Object.keys(sub.override_answers).length > 0 && (
                           <>
                             <div style={{ fontSize: 12, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Override Alerts</div>
-                            {overrideQs.filter(q => sub.override_answers[q.question_key] !== undefined).map(q => (
-                              <div key={q.question_key} style={{
-                                padding: "10px 14px", borderRadius: 10,
-                                background: sub.override_answers[q.question_key] ? "#fef2f2" : "#f0fdf4",
-                                border: `1px solid ${sub.override_answers[q.question_key] ? "#fca5a5" : "#86efac"}`,
-                                display: "flex", justifyContent: "space-between", alignItems: "center",
-                                fontSize: 13, marginBottom: 8,
-                              }}>
-                                <span style={{ color: "#374151" }}>{q.question_text}</span>
-                                <span style={{ fontWeight: 700, color: sub.override_answers[q.question_key] ? "#dc2626" : "#15803d" }}>
-                                  {sub.override_answers[q.question_key] ? "🚨 Triggered" : "✓ Clear"}
-                                </span>
-                              </div>
-                            ))}
+                            {Object.entries(sub.override_answers)
+                              .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
+                              .map(([key, ans]) => (
+                                <div key={key} style={{
+                                  padding: "10px 14px", borderRadius: 10,
+                                  background: ans.triggered ? "#fef2f2" : "#f0fdf4",
+                                  border: `1px solid ${ans.triggered ? "#fca5a5" : "#86efac"}`,
+                                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                                  fontSize: 13, marginBottom: 8,
+                                }}>
+                                  <span style={{ color: "#374151" }}>{ans.question_text}</span>
+                                  <span style={{ fontWeight: 700, color: ans.triggered ? "#dc2626" : "#15803d", flexShrink: 0, marginLeft: 12 }}>
+                                    {ans.triggered ? "🚨 Triggered" : "✓ Clear"}
+                                  </span>
+                                </div>
+                              ))}
                           </>
                         )}
                         {sub.images && sub.images.length > 0 && (
@@ -1112,7 +1157,86 @@ export default function PatientDetailPage() {
         </SectionCard>
 
         {/* ══════════════════════════════════════════════════════════════
-            SECTION 6 — PERSONAL INFORMATION
+            SECTION 6 — ALERT HISTORY
+        ══════════════════════════════════════════════════════════════ */}
+        <SectionCard title="Alert History" icon={AlertTriangle} accent="#dc2626">
+          {historyAlerts.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "32px 0", color: "#94a3b8", fontSize: 14 }}>No alerts recorded for this patient.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {historyAlerts.map((alert) => {
+                const isResolved = alert.alert_status === "resolved";
+                const isInProcess = alert.alert_status === "in_process";
+                const alertColor = alert.alert_type === "red" ? "#dc2626" : "#a16207";
+                const alertBg = alert.alert_type === "red" ? "#fee2e2" : "#fef9c3";
+                const statusColor = isResolved ? "#15803d" : isInProcess ? "#a16207" : "#dc2626";
+                const statusBg = isResolved ? "#dcfce7" : isInProcess ? "#fef9c3" : "#fee2e2";
+                const statusLabel = isResolved ? "Resolved" : isInProcess ? "In Process" : "Pending";
+                return (
+                  <div key={alert.id} style={{
+                    borderRadius: 16, border: `1.5px solid ${isResolved ? "#86efac" : isInProcess ? "#fde68a" : "#fca5a5"}`,
+                    background: isResolved ? "#f0fdf4" : isInProcess ? "#fffbeb" : "#fef2f2",
+                    overflow: "hidden",
+                  }}>
+                    {/* Alert header row */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", flexWrap: "wrap" }}>
+                      <div style={{ padding: "4px 14px", borderRadius: 99, background: alertBg, color: alertColor, fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                        {alert.alert_type === "red" ? "🔴 Red Alert" : "🟡 Yellow Alert"}
+                      </div>
+                      <div style={{ padding: "4px 14px", borderRadius: 99, background: statusBg, color: statusColor, fontWeight: 700, fontSize: 12 }}>
+                        {statusLabel}
+                      </div>
+                      {alert.submission_day_number != null && (
+                        <div style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Day {alert.submission_day_number}</div>
+                      )}
+                      {alert.escalated && (
+                        <div style={{ padding: "4px 12px", borderRadius: 99, background: "#fdf2f8", color: "#9333ea", fontWeight: 700, fontSize: 11 }}>⚡ Escalated</div>
+                      )}
+                      <div style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8" }}>{fmtTime(alert.created_at)}</div>
+                    </div>
+
+                    {/* Resolution details */}
+                    {(isResolved || isInProcess) && (
+                      <div style={{ padding: "0 18px 14px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
+                        {alert.in_process_at && (
+                          <div style={{ fontSize: 12, color: "#64748b" }}>
+                            <span style={{ fontWeight: 700, color: "#a16207" }}>In Process: </span>
+                            {fmtTime(alert.in_process_at)}
+                            {alert.in_process_by_name && <span style={{ color: "#94a3b8" }}> · by {alert.in_process_by_name}</span>}
+                          </div>
+                        )}
+                        {isResolved && alert.resolved_at && (
+                          <div style={{ fontSize: 12, color: "#64748b" }}>
+                            <span style={{ fontWeight: 700, color: "#15803d" }}>Resolved: </span>
+                            {fmtTime(alert.resolved_at)}
+                            {alert.resolved_by_name && <span style={{ color: "#94a3b8" }}> · by {alert.resolved_by_name}</span>}
+                          </div>
+                        )}
+                        {alert.resolution_category && (
+                          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "rgba(55,138,221,0.08)", border: "1px solid rgba(55,138,221,0.2)", width: "fit-content" }}>
+                            <Shield size={13} color="#378ADD" />
+                            <span style={{ fontSize: 12, fontWeight: 700, color: "#378ADD" }}>
+                              {alert.resolution_category.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                            </span>
+                          </div>
+                        )}
+                        {alert.resolution_note && (
+                          <div style={{ padding: "10px 14px", borderRadius: 10, background: "white", border: "1px solid #e2e8f0" }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>Resolution Note</div>
+                            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.5 }}>{alert.resolution_note}</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </SectionCard>
+
+        {/* ══════════════════════════════════════════════════════════════
+            SECTION 7 — PERSONAL INFORMATION
         ══════════════════════════════════════════════════════════════ */}
         <SectionCard title="Personal Information" icon={User} accent="#1D9E75">
           <div className="personal-info-grid">
