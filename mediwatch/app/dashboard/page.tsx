@@ -26,6 +26,7 @@ interface ApiPatient {
   day_number: number;
   has_unack_alert: boolean | null;
   alert_id: string | null;
+  alert_status: "pending" | "in_process" | "resolved" | null;
   age?: number;
   gender?: string;
   diagnosis?: string;
@@ -36,7 +37,6 @@ interface ApiPatient {
   relative_contact?: string;
   relative_phone?: string;
   last_submitted?: string;
-  triage_status?: string;
 }
 
 interface RedAlert {
@@ -74,22 +74,22 @@ interface Patient {
   hasUnackAlert: boolean | null;
   alertId: string | null;
   lastSubmitted: string;
-  triageStatus: string;
+
   // enriched from redAlerts
   diseaseScore?: number;
   alertReason?: string;
   // local UI lifecycle state
-  lifecycleStatus: "ack" | "in_progress" | "resolved";
+  lifecycleStatus: "pending" | "in_process" | "resolved";
   isAcknowledging: boolean;
   isResolving: boolean;
 }
 
 const RESOLUTION_CATEGORIES = [
-  "symptom improved",
-  "false alert",
-  "medication advised",
-  "doctor consultation",
-  "hospital visit recommended",
+  "symptom_improved",
+  "false_alert",
+  "medication_advised",
+  "doctor_consultation",
+  "hospital_visit_recommended",
 ] as const;
 
 type ResolutionCategory = (typeof RESOLUTION_CATEGORIES)[number];
@@ -121,11 +121,13 @@ const formatDateTime = (dateString: string): string => {
 
 const normalisePatient = (p: ApiPatient, alertMap: Record<string, RedAlert>): Patient => {
   const alert = p.alert_id ? alertMap[p.alert_id] : Object.values(alertMap).find(a => a.patientId === p.id);
-  const triageStatus = p.triage_status ?? "ack";
+  // Map real API alert_status values to lifecycleStatus
+  // Do not default null to "pending" -- null means no active alert, handled by the filter above
+  const rawStatus = p.alert_status;
   const lifecycleStatus: Patient["lifecycleStatus"] =
-    triageStatus === "resolved" ? "resolved"
-    : triageStatus === "in_progress" ? "in_progress"
-    : "ack";
+    rawStatus === "resolved" ? "resolved"
+      : rawStatus === "in_process" ? "in_process"
+        : "pending";
 
   return {
     id: p.id,
@@ -142,7 +144,6 @@ const normalisePatient = (p: ApiPatient, alertMap: Record<string, RedAlert>): Pa
     hasUnackAlert: p.has_unack_alert,
     alertId: p.alert_id ?? alert?.alertId ?? null,
     lastSubmitted: p.last_submitted ?? new Date().toISOString(),
-    triageStatus,
     diseaseScore: alert?.diseaseScore,
     alertReason: alert?.reason,
     lifecycleStatus,
@@ -152,19 +153,19 @@ const normalisePatient = (p: ApiPatient, alertMap: Record<string, RedAlert>): Pa
 };
 
 const CATEGORY_LABELS: Record<ResolutionCategory, string> = {
-  "symptom improved": "Symptom Improved",
-  "false alert": "False Alert",
-  "medication advised": "Medication Advised",
-  "doctor consultation": "Doctor Consultation",
-  "hospital visit recommended": "Hospital Visit Recommended",
+  "symptom_improved": "Symptom Improved",
+  "false_alert": "False Alert",
+  "medication_advised": "Medication Advised",
+  "doctor_consultation": "Doctor Consultation",
+  "hospital_visit_recommended": "Hospital Visit Recommended",
 };
 
 const CATEGORY_ICONS: Record<ResolutionCategory, string> = {
-  "symptom improved": "✅",
-  "false alert": "🔕",
-  "medication advised": "💊",
-  "doctor consultation": "🩺",
-  "hospital visit recommended": "🏥",
+  "symptom_improved": "✅",
+  "false_alert": "🔕",
+  "medication_advised": "💊",
+  "doctor_consultation": "🩺",
+  "hospital_visit_recommended": "🏥",
 };
 
 // ─── Disease Score Color Helper ────────────────────────────────────────────
@@ -178,7 +179,7 @@ const getScoreColor = (score: number | undefined): ScoreColor => {
   if (score === undefined || score === null) {
     return { color: "#cbd5e1", background: "#f8fafc" };
   }
-  
+
   if (score < 4) {
     // 1-3.9: Green
     return { color: "#15803d", background: "#dcfce7" };
@@ -207,7 +208,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [resolveModal, setResolveModal] = useState<ResolveModalState | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<"all" | "ack" | "in_progress">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "in_process">("all");
   const filterRef = useRef<HTMLDivElement>(null);
 
   // ── Handle click outside filter dropdown ────────────────────────────────────
@@ -255,9 +256,9 @@ export default function DashboardPage() {
       const statsRaw = data?.stats ?? {};
       setStats({
         total_active: Number(statsRaw.total_active ?? 0),
-        green:        Number(statsRaw.green        ?? 0),
-        yellow:       Number(statsRaw.yellow       ?? 0),
-        red:          Number(statsRaw.red          ?? 0),
+        green: Number(statsRaw.green ?? 0),
+        yellow: Number(statsRaw.yellow ?? 0),
+        red: Number(statsRaw.red ?? 0),
       });
 
       // Build alertMap from redAlerts for enrichment
@@ -266,10 +267,15 @@ export default function DashboardPage() {
         alertMap[a.alertId] = a;
       });
 
-      // Only red trend patients that are not already resolved
+      // Only show patients with a real pending/in_process alert (alert_id must exist)
+      // After resolving, the dashboard API returns alert_id=null for that patient -> they drop off
       const list: ApiPatient[] = Array.isArray(data?.activePatients) ? data.activePatients : [];
       const red = list
-        .filter(p => p.trend_status === "red" && (p.triage_status ?? "ack") !== "resolved")
+        .filter(p =>
+          p.alert_id !== null &&
+          p.alert_status !== null &&
+          p.alert_status !== "resolved"
+        )
         .map(p => normalisePatient(p, alertMap));
 
       setRedPatients(prev => {
@@ -305,30 +311,77 @@ export default function DashboardPage() {
 
   // ── Acknowledge: ack → in_progress ───────────────────────────────────────
 
-  const acknowledgePatient = async (patientId: string) => {
+  // ── Acknowledge: pending → in_process ────────────────────────────────────
+  // Uses POST /doctor/alerts/:alertId/in-process (empty body)
+  const acknowledgePatient = async (patientId: string, alertId: string) => {
+    if (!alertId) return;
     setRedPatients(prev =>
       prev.map(p => p.id === patientId ? { ...p, isAcknowledging: true } : p)
     );
 
     try {
       const res = await fetch(
-        `https://api.mediwatch.in/api/v1/doctor/patients/${patientId}/triage`,
+        `https://api.mediwatch.in/api/v1/doctor/alerts/${alertId}/in-process`,
         {
-          method: "PATCH",
+          method: "POST",
           headers: {
             Authorization: `Bearer ${getToken()}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ triageStatus: "in_progress" }),
+          body: JSON.stringify({}),
         }
       );
 
-      if (!res.ok) throw new Error(`Failed to acknowledge (${res.status})`);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.message ?? `Failed to acknowledge (${res.status})`);
+      }
 
       setRedPatients(prev =>
         prev.map(p =>
           p.id === patientId
-            ? { ...p, lifecycleStatus: "in_progress", isAcknowledging: false }
+            ? { ...p, lifecycleStatus: "in_process", isAcknowledging: false }
+            : p
+        )
+      );
+
+    } catch {
+      setRedPatients(prev =>
+        prev.map(p => p.id === patientId ? { ...p, isAcknowledging: false } : p)
+      );
+    }
+  };
+
+  // ── Unacknowledge: in_process → pending ───────────────────────────────────
+  // Uses POST /doctor/alerts/:alertId/unacknowledge (empty body)
+  const unacknowledgePatient = async (patientId: string, alertId: string) => {
+    if (!alertId) return;
+    setRedPatients(prev =>
+      prev.map(p => p.id === patientId ? { ...p, isAcknowledging: true } : p)
+    );
+
+    try {
+      const res = await fetch(
+        `https://api.mediwatch.in/api/v1/doctor/alerts/${alertId}/unacknowledge`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getToken()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        }
+      );
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.message ?? `Failed to revert (${res.status})`);
+      }
+
+      setRedPatients(prev =>
+        prev.map(p =>
+          p.id === patientId
+            ? { ...p, lifecycleStatus: "pending", isAcknowledging: false }
             : p
         )
       );
@@ -373,37 +426,44 @@ export default function DashboardPage() {
       prev.map(p => p.id === resolveModal.patientId ? { ...p, isResolving: true } : p)
     );
 
+    if (!resolveModal.alertId) {
+      setResolveModal(prev => prev ? { ...prev, error: "No alert ID found for this patient." } : null);
+      return;
+    }
+
     try {
+      // POST /doctor/alerts/:alertId/resolve
+      // resolutionCategory must be the snake_case enum value (e.g. "medication_advised")
+      // resolutionNote is free-text visible to the patient via SMS
       const triageRes = await fetch(
-        `https://api.mediwatch.in/api/v1/doctor/patients/${resolveModal.patientId}/triage`,
+        `https://api.mediwatch.in/api/v1/doctor/alerts/${resolveModal.alertId}/resolve`,
         {
-          method: "PATCH",
+          method: "POST",
           headers: {
             Authorization: `Bearer ${getToken()}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            triageStatus: "resolved",
-            resolutionCategory: CATEGORY_LABELS[resolveModal.category],
             resolutionNote: resolveModal.note.trim(),
+            resolutionCategory: resolveModal.category, // already snake_case
           }),
         }
       );
 
       if (!triageRes.ok) {
         const errBody = await triageRes.json().catch(() => ({}));
-        throw new Error(errBody?.message ?? `Failed to resolve patient (${triageRes.status})`);
+        throw new Error(errBody?.message ?? `Failed to resolve alert (${triageRes.status})`);
       }
 
+      // Remove the resolved patient from the red alert list entirely
+      // and re-fetch to get fresh stats (the server stats card also needs updating)
       setRedPatients(prev =>
-        prev.map(p =>
-          p.id === resolveModal.patientId
-            ? { ...p, lifecycleStatus: "resolved", isResolving: false }
-            : p
-        )
+        prev.filter(p => p.id !== resolveModal.patientId)
       );
 
       setResolveModal(null);
+      // Re-fetch dashboard to update stat cards (total red count etc.)
+      fetchDashboard(search);
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong.";
@@ -417,8 +477,8 @@ export default function DashboardPage() {
   // ── Pagination ────────────────────────────────────────────────────────────
   const filteredPatients = statusFilter === "all"
     ? redPatients
-    : redPatients.filter(p => p.lifecycleStatus === statusFilter);
-  
+    : redPatients.filter(p => p.lifecycleStatus === (statusFilter as Patient["lifecycleStatus"]));
+
   const totalPages = Math.max(1, Math.ceil(filteredPatients.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPages);
   const paginated = filteredPatients.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
@@ -433,9 +493,9 @@ export default function DashboardPage() {
     return pages;
   };
 
-  const pendingCount   = redPatients.filter(p => p.lifecycleStatus === "ack").length;
-  const inProgCount    = redPatients.filter(p => p.lifecycleStatus === "in_progress").length;
-  const resolvedCount  = redPatients.filter(p => p.lifecycleStatus === "resolved").length;
+  const pendingCount = redPatients.filter(p => p.lifecycleStatus === "pending").length;
+  const inProgCount = redPatients.filter(p => p.lifecycleStatus === "in_progress").length;
+  const resolvedCount = redPatients.filter(p => p.lifecycleStatus === "resolved").length;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -540,10 +600,10 @@ export default function DashboardPage() {
         {/* Stat Cards */}
         <div className="responsive-grid-4" style={{ marginBottom: 32 }}>
           {[
-            { label: "Total Active", value: stats.total_active, color: "#378ADD", bg: "#eff6ff",  icon: Users },
-            { label: "Low Risk",     value: stats.green,        color: "#15803d", bg: "#f0fdf4",  icon: ShieldCheck },
-            { label: "Medium Risk",  value: stats.yellow,       color: "#a16207", bg: "#fefce8",  icon: Activity },
-            { label: "High Risk",    value: stats.red,          color: "#dc2626", bg: "#fef2f2",  icon: AlertTriangle },
+            { label: "Total Active", value: stats.total_active, color: "#378ADD", bg: "#eff6ff", icon: Users },
+            { label: "Low Risk", value: stats.green, color: "#15803d", bg: "#f0fdf4", icon: ShieldCheck },
+            { label: "Medium Risk", value: stats.yellow, color: "#a16207", bg: "#fefce8", icon: Activity },
+            { label: "High Risk", value: stats.red, color: "#dc2626", bg: "#fef2f2", icon: AlertTriangle },
           ].map(card => (
             <div
               key={card.label}
@@ -671,7 +731,7 @@ export default function DashboardPage() {
                 }}
               >
                 <SlidersHorizontal size={16} />
-                {statusFilter === "all" ? "Filter" : statusFilter === "ack" ? "Pending" : "In Review"}
+                {statusFilter === "all" ? "Filter" : statusFilter === "pending" ? "Pending" : "In Review"}
               </button>
 
               {/* Dropdown Menu */}
@@ -692,8 +752,8 @@ export default function DashboardPage() {
                 >
                   {[
                     { value: "all" as const, label: "All Patients", color: "#374151" },
-                    { value: "ack" as const, label: "Pending", color: "#dc2626" },
-                    { value: "in_progress" as const, label: "In Review", color: "#a16207" },
+                    { value: "pending" as const, label: "Pending", color: "#dc2626" },
+                    { value: "in_process" as const, label: "In Review", color: "#a16207" },
                   ].map((option) => (
                     <button
                       key={option.value}
@@ -713,7 +773,7 @@ export default function DashboardPage() {
                         textAlign: "left",
                         cursor: "pointer",
                         transition: "all 0.15s",
-                        borderBottom: option.value !== "in_progress" ? "1px solid #f1f5f9" : "none",
+                        borderBottom: option.value !== "in_process" ? "1px solid #f1f5f9" : "none",
                         display: "flex",
                         alignItems: "center",
                         gap: 8,
@@ -779,18 +839,18 @@ export default function DashboardPage() {
 
           {/* Rows */}
           {!loading && paginated.map((p, idx) => {
-            const isInProgress = p.lifecycleStatus === "in_progress";
-            const isResolved   = p.lifecycleStatus === "resolved";
-            const isPending    = p.lifecycleStatus === "ack";
+            const isInProgress = p.lifecycleStatus === "in_process";
+            const isResolved = p.lifecycleStatus === "resolved";
+            const isPending = p.lifecycleStatus === "pending";
 
             const rowClass = isResolved
               ? "patient-row-resolved"
               : isInProgress
-              ? "patient-row-inprogress"
-              : "patient-row-ack";
+                ? "patient-row-inprogress"
+                : "patient-row-ack";
 
             const scoreColorObj = getScoreColor(p.diseaseScore);
-            const scoreBg    = scoreColorObj.background;
+            const scoreBg = scoreColorObj.background;
             const scoreColor = scoreColorObj.color;
 
             return (
@@ -922,7 +982,7 @@ export default function DashboardPage() {
                     {isPending && (
                       <button
                         disabled={p.isAcknowledging}
-                        onClick={() => acknowledgePatient(p.id)}
+                        onClick={() => acknowledgePatient(p.id, p.alertId ?? "")}
                         style={{
                           padding: "6px 12px", borderRadius: 10,
                           border: "1.5px solid #dc2626",
@@ -938,7 +998,27 @@ export default function DashboardPage() {
                       </button>
                     )}
 
-                    {/* Resolve: in_progress → resolved */}
+                    {/* Unacknowledge: in_process → pending (revert if clicked by mistake) */}
+                    {isInProgress && (
+                      <button
+                        disabled={p.isAcknowledging}
+                        onClick={() => unacknowledgePatient(p.id, p.alertId ?? "")}
+                        style={{
+                          padding: "6px 12px", borderRadius: 10,
+                          border: "1.5px solid #64748b",
+                          color: "#64748b",
+                          background: "transparent",
+                          fontSize: 12, fontWeight: 600,
+                          cursor: p.isAcknowledging ? "not-allowed" : "pointer",
+                          transition: "all 0.2s",
+                          opacity: p.isAcknowledging ? 0.5 : 1,
+                        }}
+                      >
+                        {p.isAcknowledging ? "…" : "Undo"}
+                      </button>
+                    )}
+
+                    {/* Resolve: in_process → resolved */}
                     {isInProgress && (
                       <button
                         disabled={p.isResolving}
@@ -1068,7 +1148,7 @@ export default function DashboardPage() {
                       {isPending && (
                         <button
                           disabled={p.isAcknowledging}
-                          onClick={() => acknowledgePatient(p.id)}
+                          onClick={() => acknowledgePatient(p.id, p.alertId ?? "")}
                           style={{
                             flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
                             background: p.isAcknowledging ? "#f1f5f9" : "#dc2626",
@@ -1118,9 +1198,9 @@ export default function DashboardPage() {
 
           {!loading && filteredPatients.length === 0 && (
             <div style={{ padding: "48px", textAlign: "center", color: "#94a3b8" }}>
-              {redPatients.length === 0 
+              {redPatients.length === 0
                 ? "No red alert patients found"
-                : `No ${statusFilter === "ack" ? "pending" : statusFilter === "in_progress" ? "in review" : ""} patients found`}
+                : `No ${statusFilter === "pending" ? "pending" : statusFilter === "in_process" ? "in review" : ""} patients found`}
             </div>
           )}
 

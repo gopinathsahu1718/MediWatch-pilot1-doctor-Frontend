@@ -10,24 +10,26 @@ import Link from "next/link";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ApiStatus = "active" | "inactive" | "completed" | "incomplete" | "pending_login";
 type SortOption = "none" | "az" | "za" | "risk_high" | "risk_low";
 
-interface ApiResolvedPatient {
-  id: string;
-  name: string;
-  phone: string;
-  status: ApiStatus;
-  risk_category: "low" | "medium" | "high";
-  monitoring_days: number;
-  registration_step: string;
+// Resolved alert from GET /doctor/alerts?status=resolved
+interface ResolvedAlert {
+  id: string;                        // alert ID
+  alert_type: "red" | "yellow";
+  alert_status: "resolved";
   created_at: string;
-  monitoring_start: string | null;
-  monitoring_end: string | null;
-  disease_name: string;
+  resolved_at: string | null;
+  resolved_by_name: string | null;
+  resolution_note: string | null;
+  resolution_category: string | null;
+  patient_id: string;
+  patient_name: string;
+  patient_readable_id: string;
+  patient_phone: string;
+  risk_category: "low" | "medium" | "high";
   day_number: number | null;
-  triage_status: string;
-  resolved_reason?: string;
+  disease_score: number | null;
+  submission_trend: string | null;
 }
 
 interface Pagination {
@@ -49,42 +51,35 @@ function formatDate(iso: string | null): string {
   return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-const STATUS_META: Record<ApiStatus, { label: string; bg: string; color: string }> = {
-  active:        { label: "Active",        bg: "#f0fdf4", color: "#15803d" },
-  inactive:      { label: "Inactive",      bg: "#fefce8", color: "#a16207" },
-  completed:     { label: "Completed",     bg: "#eff6ff", color: "#1d4ed8" },
-  incomplete:    { label: "Incomplete",    bg: "#fef2f2", color: "#dc2626" },
-  pending_login: { label: "Pending Login", bg: "#f5f3ff", color: "#7c3aed" },
-};
 
 const RISK_META: Record<string, { label: string; color: string; bg: string; weight: number }> = {
-  high:   { label: "High",   color: "#dc2626", bg: "#fee2e2", weight: 3 },
+  high: { label: "High", color: "#dc2626", bg: "#fee2e2", weight: 3 },
   medium: { label: "Medium", color: "#a16207", bg: "#fef9c3", weight: 2 },
-  low:    { label: "Low",    color: "#15803d", bg: "#dcfce7", weight: 1 },
+  low: { label: "Low", color: "#15803d", bg: "#dcfce7", weight: 1 },
 };
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
-  { value: "none",      label: "Default order" },
-  { value: "az",        label: "Name: A → Z" },
-  { value: "za",        label: "Name: Z → A" },
+  { value: "none", label: "Default order" },
+  { value: "az", label: "Name: A → Z" },
+  { value: "za", label: "Name: Z → A" },
   { value: "risk_high", label: "Risk: High first" },
-  { value: "risk_low",  label: "Risk: Low first" },
+  { value: "risk_low", label: "Risk: Low first" },
 ];
 
 const STATUS_FILTERS = [
-  { value: "all",           label: "All Statuses" },
-  { value: "active",        label: "Active" },
-  { value: "inactive",      label: "Inactive" },
-  { value: "completed",     label: "Completed" },
-  { value: "incomplete",    label: "Incomplete" },
+  { value: "all", label: "All Statuses" },
+  { value: "active", label: "Active" },
+  { value: "inactive", label: "Inactive" },
+  { value: "completed", label: "Completed" },
+  { value: "incomplete", label: "Incomplete" },
   { value: "pending_login", label: "Pending Login" },
 ];
 
-function sortPatients(patients: ApiResolvedPatient[], sort: SortOption): ApiResolvedPatient[] {
+function sortPatients(patients: ResolvedAlert[], sort: SortOption): ResolvedAlert[] {
   if (sort === "none") return patients;
   return [...patients].sort((a, b) => {
-    if (sort === "az") return a.name.localeCompare(b.name);
-    if (sort === "za") return b.name.localeCompare(a.name);
+    if (sort === "az") return a.patient_name.localeCompare(b.patient_name);
+    if (sort === "za") return b.patient_name.localeCompare(a.patient_name);
     const wa = RISK_META[a.risk_category]?.weight ?? 0;
     const wb = RISK_META[b.risk_category]?.weight ?? 0;
     return sort === "risk_high" ? wb - wa : wa - wb;
@@ -96,16 +91,16 @@ function sortPatients(patients: ApiResolvedPatient[], sort: SortOption): ApiReso
 export default function ResolvedPatientsPage() {
   const router = useRouter();
 
-  const [search,       setSearch]       = useState("");
+  const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [sortOption,   setSortOption]   = useState<SortOption>("none");
-  const [page,         setPage]         = useState(1);
+  const [sortOption, setSortOption] = useState<SortOption>("none");
+  const [page, setPage] = useState(1);
   const LIMIT = 20;
 
-  const [patients,   setPatients]   = useState<ApiResolvedPatient[]>([]);
+  const [patients, setPatients] = useState<ResolvedAlert[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Filter dropdown state
   const [filterOpen, setFilterOpen] = useState(false);
@@ -133,59 +128,39 @@ export default function ResolvedPatientsPage() {
       const token = getToken();
       if (!token) { routerRef.current.replace("/login"); return; }
 
-      // ── Loop all backend pages, filter resolved client-side ──
-      let allResolved: ApiResolvedPatient[] = [];
-      let currentPage = 1;
-      let totalPages = 1;
+      // Fetch resolved alerts from the real alerts API
+      // GET /doctor/alerts?status=resolved returns alerts with patient info embedded
+      const params = new URLSearchParams();
+      params.set("status", "resolved");
+      params.set("page", String(page));
+      params.set("limit", String(LIMIT));
+      if (search.trim()) params.set("search", search.trim());
 
-      do {
-        const params = new URLSearchParams();
-        if (status !== "all") params.set("status", status);
-        if (search.trim())    params.set("search", search.trim());
-        params.set("page", String(currentPage));
-        // No limit param — backend defaults to 20 and ignores overrides
+      const res = await fetch(
+        `https://api.mediwatch.in/api/v1/doctor/alerts?${params}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
 
-        const res = await fetch(
-          `https://api.mediwatch.in/api/v1/doctor/patients?${params}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
+      if (res.status === 401) {
+        localStorage.removeItem("doctor_token");
+        document.cookie = "doctor_token=; path=/; max-age=0; SameSite=Strict";
+        routerRef.current.replace("/login");
+        return;
+      }
+      if (!res.ok) throw new Error(`Server error (${res.status})`);
 
-        if (res.status === 401) {
-          localStorage.removeItem("doctor_token");
-          document.cookie = "doctor_token=; path=/; max-age=0; SameSite=Strict";
-          routerRef.current.replace("/login");
-          return;
-        }
-        if (!res.ok) throw new Error(`Server error (${res.status})`);
+      const raw = await res.json();
+      const data = raw?.data;
+      const alerts: ResolvedAlert[] = Array.isArray(data?.alerts) ? data.alerts : [];
+      const pg = data?.pagination;
 
-        const raw = await res.json();
-        const data = raw?.data;
-        const batch: ApiResolvedPatient[] = Array.isArray(data?.patients) ? data.patients : [];
-
-        // Filter resolved from each batch as it arrives
-        allResolved = [
-          ...allResolved,
-          ...batch.filter(p => p.triage_status === "resolved"),
-        ];
-
-        // Read totalPages from every response in case total shifts
-        totalPages = data?.pagination?.totalPages ?? 1;
-        currentPage++;
-
-      } while (currentPage <= totalPages);
-
-      // ── Client-side pagination over the fully collected resolved list ──
-      const total = allResolved.length;
-      const start = (page - 1) * LIMIT;
-      const paginated = allResolved.slice(start, start + LIMIT);
-
-      setPatients(paginated);
-      setPagination({
-        total,
-        page,
-        limit: LIMIT,
-        totalPages: Math.max(1, Math.ceil(total / LIMIT)),
-      });
+      setPatients(alerts);
+      setPagination(pg ? {
+        total: pg.total,
+        page: pg.page,
+        limit: pg.limit,
+        totalPages: pg.totalPages,
+      } : { total: alerts.length, page: 1, limit: LIMIT, totalPages: 1 });
 
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -199,10 +174,10 @@ export default function ResolvedPatientsPage() {
       fetchResolvedPatients(search, statusFilter, page);
     }, search ? 400 : 0);
     return () => clearTimeout(t);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, statusFilter, page]);
 
-  const handleSearch = (v: string) => { setSearch(v);       setPage(1); };
+  const handleSearch = (v: string) => { setSearch(v); setPage(1); };
   const handleStatus = (v: string) => { setStatusFilter(v); setPage(1); };
 
   // Derived sorted list
@@ -230,7 +205,7 @@ export default function ResolvedPatientsPage() {
     return pages;
   };
 
-  const COL_HEADERS = ["Patient", "Disease", "Risk", "Status", "Triage Status", "Monitoring", "Registered", "Action"];
+  const COL_HEADERS = ["Patient", "Alert Type", "Risk", "Score", "Resolution", "Resolved By", "Resolved At", "Action"];
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -401,7 +376,7 @@ export default function ResolvedPatientsPage() {
                     fontSize: 10, fontWeight: 800, color: "#94a3b8",
                     textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
                   }}>
-                    Status
+                    Alert Type
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                     {STATUS_FILTERS.map(f => (
@@ -441,7 +416,7 @@ export default function ResolvedPatientsPage() {
                 {/* Divider */}
                 <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
 
-                
+
 
                 {/* Footer — clear all */}
                 {hasFilters && (
@@ -478,7 +453,7 @@ export default function ResolvedPatientsPage() {
                 background: "rgba(29,158,117,0.1)", border: "1px solid rgba(29,158,117,0.25)",
                 color: "#1D9E75", fontSize: 12, fontWeight: 600,
               }}>
-                Status: {STATUS_FILTERS.find(f => f.value === statusFilter)?.label}
+                Alert type: {STATUS_FILTERS.find(f => f.value === statusFilter)?.label}
                 <button
                   onClick={() => handleStatus("all")}
                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#1D9E75" }}
@@ -545,9 +520,11 @@ export default function ResolvedPatientsPage() {
 
           {/* Patient rows */}
           {!loading && displayedPatients.map(p => {
-            const sm = STATUS_META[p.status] ?? STATUS_META.inactive;
             const rm = RISK_META[p.risk_category] ?? RISK_META.low;
-            const initials = p.name.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase();
+            const initials = p.patient_name.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase();
+            const alertTypeBg = p.alert_type === "red" ? "#fee2e2" : "#fef9c3";
+            const alertTypeColor = p.alert_type === "red" ? "#dc2626" : "#a16207";
+            const resolutionLabel = p.resolution_category ? p.resolution_category.replace(/_/g, " ") : "\u2014";
 
             return (
               <div key={p.id}>
@@ -558,39 +535,26 @@ export default function ResolvedPatientsPage() {
                     padding: "14px 24px", borderBottom: "1px solid #f1f5f9",
                     alignItems: "center", cursor: "pointer", transition: "background 0.15s",
                   }}
-                  onClick={() => router.push(`/IDpatient/${p.id}`)}
+                  onClick={() => router.push(`/IDpatient/${p.patient_id}`)}
                   onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                   onMouseLeave={e => (e.currentTarget.style.background = "white")}
                 >
                   <div>
-                    <div style={{ fontWeight: 600, color: "#0f172a", fontSize: 14 }}>{p.name}</div>
-                    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.phone}</div>
+                    <div style={{ fontWeight: 600, color: "#0f172a", fontSize: 14 }}>{p.patient_name}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.patient_readable_id} · {p.patient_phone}</div>
                   </div>
-                  <div style={{ fontSize: 13, color: "#475569" }}>{p.disease_name || "—"}</div>
+                  <div><span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: alertTypeBg, color: alertTypeColor, textTransform: "uppercase" }}>{p.alert_type}</span></div>
                   <div>
                     <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: rm.bg, color: rm.color }}>
                       {rm.label}
                     </span>
                   </div>
-                  <div>
-                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: sm.bg, color: sm.color }}>
-                      {sm.label}
-                    </span>
-                  </div>
-                  <div>
-                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: "#dcfce7", color: "#15803d" }}>
-                      Resolved
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 13, color: "#475569" }}>
-                    {p.monitoring_days ? `${p.monitoring_days}d` : "—"}
-                    {p.day_number !== null && (
-                      <span style={{ color: "#94a3b8", fontSize: 12, display: "block" }}>Day {p.day_number}</span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.created_at)}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#374151" }}>{p.disease_score != null ? p.disease_score.toFixed(2) : "—"}</div>
+                  <div style={{ fontSize: 12, color: "#374151", textTransform: "capitalize" }}>{resolutionLabel}</div>
+                  <div style={{ fontSize: 13, color: "#475569" }}>{p.resolved_by_name || "—"}</div>
+                  <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.resolved_at)}</div>
                   <div onClick={e => e.stopPropagation()}>
-                    <Link href={`/IDpatient/${p.id}`}>
+                    <Link href={`/IDpatient/${p.patient_id}`}>
                       <button
                         style={{
                           padding: "6px 16px", borderRadius: 10,
@@ -617,7 +581,7 @@ export default function ResolvedPatientsPage() {
                 <div
                   className="patient-mobile-card"
                   style={{ display: "none" }}
-                  onClick={() => router.push(`/IDpatient/${p.id}`)}
+                  onClick={() => router.push(`/IDpatient/${p.patient_id}`)}
                 >
                   <div style={{
                     position: "absolute", left: 0, top: 0, bottom: 0,
@@ -633,17 +597,17 @@ export default function ResolvedPatientsPage() {
                         {initials}
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 700, color: "#0f172a", fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
-                        <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.phone}</div>
+                        <div style={{ fontWeight: 700, color: "#0f172a", fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.patient_name}</div>
+                        <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.patient_readable_id}</div>
                       </div>
                       <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, background: rm.bg, color: rm.color, flexShrink: 0 }}>{rm.label}</span>
                     </div>
                     <div style={{ height: 1, background: "#f1f5f9", marginBottom: 12 }} />
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
                       {[
-                        { label: "Disease",    value: (p.disease_name || "—").split(" ").slice(0, 2).join(" ") },
-                        { label: "Status",     value: sm.label, valueColor: sm.color },
-                        { label: "Monitoring", value: p.monitoring_days ? `${p.monitoring_days}d` : "—" },
+                        { label: "Alert", value: p.alert_type.toUpperCase(), valueColor: p.alert_type === "red" ? "#dc2626" : "#a16207" },
+                        { label: "Resolution", value: resolutionLabel },
+                        { label: "Score", value: p.disease_score != null ? String(p.disease_score.toFixed(2)) : "—" },
                       ].map(stat => (
                         <div key={stat.label} style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
                           <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{stat.label}</div>
@@ -653,9 +617,9 @@ export default function ResolvedPatientsPage() {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }} onClick={e => e.stopPropagation()}>
                       <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                        Registered: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.created_at)}</span>
+                        Resolved: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.resolved_at)}</span>
                       </div>
-                      <Link href={`/IDpatient/${p.id}`}>
+                      <Link href={`/IDpatient/${p.patient_id}`}>
                         <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                           View
                         </button>

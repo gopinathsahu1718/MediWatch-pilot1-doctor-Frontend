@@ -37,16 +37,22 @@ interface PatientDetail {
   created_at: string;
   updated_at: string;
   readable_id: string;
-  triage_status: string;
-  resolved_reason: string | null;
-  triage_updated_by: string | null;
-  triage_updated_at: string | null;
-  triage_updated_by_name: string | null;
-  triage_updated_by_role: string | null;
+  // Alert status is derived from activeAlerts[] returned by GET /doctor/patients/:id
   disease_name: string;
   department_name: string;
   basic_registered_by_name: string;
   medical_registered_by_name: string;
+}
+
+interface ActiveAlert {
+  id: string;
+  alert_type: "red" | "yellow";
+  alert_status: "pending" | "in_process" | "resolved";
+  created_at: string;
+  resolution_note: string | null;
+  resolution_category: string | null;
+  in_process_at: string | null;
+  resolved_at: string | null;
 }
 
 interface OverrideQuestion {
@@ -132,22 +138,22 @@ function monitoringProgress(start: string, end: string, totalDays: number) {
 }
 
 const RISK_META = {
-  high:   { label: "High Risk",   color: "#ff6b6b", bg: "rgba(255,107,107,0.15)", border: "rgba(255,107,107,0.3)" },
-  medium: { label: "Medium Risk", color: "#ffd93d", bg: "rgba(255,217,61,0.15)",  border: "rgba(255,217,61,0.3)"  },
-  low:    { label: "Low Risk",    color: "#6bcb77", bg: "rgba(107,203,119,0.15)", border: "rgba(107,203,119,0.3)" },
+  high: { label: "High Risk", color: "#ff6b6b", bg: "rgba(255,107,107,0.15)", border: "rgba(255,107,107,0.3)" },
+  medium: { label: "Medium Risk", color: "#ffd93d", bg: "rgba(255,217,61,0.15)", border: "rgba(255,217,61,0.3)" },
+  low: { label: "Low Risk", color: "#6bcb77", bg: "rgba(107,203,119,0.15)", border: "rgba(107,203,119,0.3)" },
 };
 
 const TREND_META: Record<string, { color: string; bg: string; label: string }> = {
-  red:    { color: "#dc2626", bg: "#fee2e2", label: "Critical" },
-  yellow: { color: "#a16207", bg: "#fef9c3", label: "Warning"  },
-  green:  { color: "#15803d", bg: "#dcfce7", label: "Stable"   },
+  red: { color: "#dc2626", bg: "#fee2e2", label: "Critical" },
+  yellow: { color: "#a16207", bg: "#fef9c3", label: "Warning" },
+  green: { color: "#15803d", bg: "#dcfce7", label: "Stable" },
 };
 
 const STATUS_META: Record<string, { color: string; bg: string; label: string; dot: string }> = {
-  active:        { color: "#15803d", bg: "rgba(107, 203, 120, 0.8)", label: "Active",        dot: "#00ff22" },
-  inactive:      { color: "#a16207", bg: "rgba(255,217,61,0.2)",  label: "Inactive",      dot: "#ffd93d" },
-  completed:     { color: "#378ADD", bg: "rgba(55,138,221,0.2)",  label: "Completed",     dot: "#378ADD" },
-  incomplete:    { color: "#ff6b6b", bg: "rgba(255,107,107,0.2)", label: "Incomplete",    dot: "#ff6b6b" },
+  active: { color: "#15803d", bg: "rgba(107, 203, 120, 0.8)", label: "Active", dot: "#00ff22" },
+  inactive: { color: "#a16207", bg: "rgba(255,217,61,0.2)", label: "Inactive", dot: "#ffd93d" },
+  completed: { color: "#378ADD", bg: "rgba(55,138,221,0.2)", label: "Completed", dot: "#378ADD" },
+  incomplete: { color: "#ff6b6b", bg: "rgba(255,107,107,0.2)", label: "Incomplete", dot: "#ff6b6b" },
   pending_login: { color: "#c084fc", bg: "rgba(192,132,252,0.2)", label: "Pending Login", dot: "#c084fc" },
 };
 
@@ -157,15 +163,15 @@ interface ScoreColorObj { color: string; background: string; }
 
 const getScoreColor = (score: number | undefined): ScoreColorObj => {
   if (score === undefined || score === null) return { color: "#cbd5e1", background: "#f8fafc" };
-  if (score < 4)  return { color: "#21d764", background: "#dcfce7" };
-  if (score < 6)  return { color: "#a16207", background: "#fef9c3" };
+  if (score < 4) return { color: "#21d764", background: "#dcfce7" };
+  if (score < 6) return { color: "#a16207", background: "#fef9c3" };
   return { color: "#dc2626", background: "#fee2e2" };
 };
 
 // Dot fill color by score value: 1–3.9 green, 4–5.9 yellow, 6–10 red
 const getDotColor = (score: number): string => {
-  if (score < 4)  return "#22c55e";
-  if (score < 6)  return "#f59e0b";
+  if (score < 4) return "#22c55e";
+  if (score < 6) return "#f59e0b";
   return "#ef4444";
 };
 
@@ -272,10 +278,10 @@ function CustomLineChart({
   // Override trend line — connect only days that have override=true, shown as dashed purple
   const overridePath = overrideData.length > 0
     ? overrideData.map((op, i) => {
-        const idx = data.findIndex(d => d.dayNumber === op.dayNumber);
-        if (idx === -1) return null;
-        return { x: xScale(idx), y: yScale(op.overrideTriggered ? maxY : 0), triggered: op.overrideTriggered };
-      }).filter(Boolean)
+      const idx = data.findIndex(d => d.dayNumber === op.dayNumber);
+      if (idx === -1) return null;
+      return { x: xScale(idx), y: yScale(op.overrideTriggered ? maxY : 0), triggered: op.overrideTriggered };
+    }).filter(Boolean)
     : [];
 
   // Y-axis grid lines
@@ -439,18 +445,19 @@ export default function PatientDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
 
-  const [patient,       setPatient]       = useState<PatientDetail | null>(null);
-  const [overrideQs,    setOverrideQs]    = useState<OverrideQuestion[]>([]);
-  const [latestSub,     setLatestSub]     = useState<LatestSubmission | null>(null);
-  const [questions,     setQuestions]     = useState<Question[]>([]);
-  const [submissions,   setSubmissions]   = useState<Submission[]>([]);
-  const [basdaiGraph,   setBasdaiGraph]   = useState<BasdaiPoint[]>([]);
+  const [patient, setPatient] = useState<PatientDetail | null>(null);
+  const [overrideQs, setOverrideQs] = useState<OverrideQuestion[]>([]);
+  const [latestSub, setLatestSub] = useState<LatestSubmission | null>(null);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [basdaiGraph, setBasdaiGraph] = useState<BasdaiPoint[]>([]);
   const [overrideGraph, setOverrideGraph] = useState<OverridePoint[]>([]);
-  const [loading,       setLoading]       = useState(true);
-  const [error,         setError]         = useState<string | null>(null);
-  const [expandedDay,   setExpandedDay]   = useState<number | null>(null);
-  const [selectedQKey,  setSelectedQKey]  = useState<string>("");
-  
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expandedDay, setExpandedDay] = useState<number | null>(null);
+  const [selectedQKey, setSelectedQKey] = useState<string>("");
+  const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
+
 
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
@@ -476,13 +483,14 @@ export default function PatientDetailPage() {
         }
         if (!detailRes.ok) throw new Error(`Failed to load patient (${detailRes.status})`);
         if (!historyRes.ok) throw new Error(`Failed to load history (${historyRes.status})`);
-        const detailJson  = await detailRes.json();
+        const detailJson = await detailRes.json();
         const historyJson = await historyRes.json();
         const d = detailJson?.data;
         const h = historyJson?.data;
         setPatient(d?.patient ?? null);
         setOverrideQs(d?.overrideQuestions ?? []);
         setLatestSub(d?.latestSubmission ?? null);
+        setActiveAlerts(d?.activeAlerts ?? []);
         const qs = h?.questions ?? [];
         setQuestions(qs);
         if (qs.length > 0) setSelectedQKey(qs[0].question_key);
@@ -499,9 +507,9 @@ export default function PatientDetailPage() {
   }, [id]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const rm   = RISK_META[patient?.risk_category ?? "low"];
-  const sm   = STATUS_META[patient?.status ?? "active"] ?? STATUS_META.active;
-  const tm   = TREND_META[latestSub?.trend_status ?? "green"] ?? TREND_META.green;
+  const rm = RISK_META[patient?.risk_category ?? "low"];
+  const sm = STATUS_META[patient?.status ?? "active"] ?? STATUS_META.active;
+  const tm = TREND_META[latestSub?.trend_status ?? "green"] ?? TREND_META.green;
   const prog = patient
     ? monitoringProgress(patient.monitoring_start, patient.monitoring_end, patient.monitoring_days)
     : { daysPassed: 0, pct: 0 };
@@ -518,8 +526,8 @@ export default function PatientDetailPage() {
   const basdaiTrend = useMemo(() => {
     if (basdaiChartData.length < 2) return null;
     const first = basdaiChartData[0].value;
-    const last  = basdaiChartData[basdaiChartData.length - 1].value;
-    const diff  = last - first;
+    const last = basdaiChartData[basdaiChartData.length - 1].value;
+    const diff = last - first;
     return { diff, isDown: diff < 0 };
   }, [basdaiChartData]);
 
@@ -542,13 +550,20 @@ export default function PatientDetailPage() {
   // Sorted submissions descending
   const sortedSubs = [...submissions].sort((a, b) => b.day_number - a.day_number);
 
-  const triageStatus = patient?.triage_status ?? "in_progress";
-  const isTriageResolved = triageStatus === "resolved";
-  const isTriageAcknowledged = triageStatus === "ack";
-  const triageLabel = isTriageResolved ? "Resolved" : isTriageAcknowledged ? "Acknowledge" : "In Progress";
-  const triagePanelBg = isTriageResolved ? "rgba(68, 219, 88, 0.2)" : isTriageAcknowledged ? "rgba(18, 104, 242, 0.97)" : "rgba(255, 195, 14, 0.5)";
-  const triagePanelBorder = isTriageResolved ? "rgba(255,255,255,0.4)" : isTriageAcknowledged ? "rgba(191,219,254,0.4)" : "rgba(255,253,253,0.4)";
-  const triageIconColor = isTriageResolved ? "#6bcb77" : isTriageAcknowledged ? "#2563eb" : "#ffd83d";
+  // Derive alert status from activeAlerts (most recent non-resolved alert)
+  // GET /doctor/patients/:id returns activeAlerts[] from the real alert table
+  const latestAlert = activeAlerts[0] ?? null;
+  const alertStatus = latestAlert?.alert_status ?? null;
+  const isTriageResolved = alertStatus === "resolved";
+  const isTriageInProcess = alertStatus === "in_process";
+  const isTriagePending = alertStatus === "pending";
+  const hasActiveAlert = latestAlert !== null;
+
+  // Display labels for the alert panel
+  const triageLabel = isTriageResolved ? "Resolved" : isTriageInProcess ? "In Process" : isTriagePending ? "Pending" : "No Alert";
+  const triagePanelBg = isTriageResolved ? "rgba(68, 219, 88, 0.2)" : isTriageInProcess ? "rgba(255, 195, 14, 0.5)" : isTriagePending ? "rgba(220, 38, 38, 0.8)" : "rgba(100, 116, 139, 0.3)";
+  const triagePanelBorder = isTriageResolved ? "rgba(255,255,255,0.4)" : isTriageInProcess ? "rgba(255,253,253,0.4)" : isTriagePending ? "rgba(252,165,165,0.4)" : "rgba(255,255,255,0.2)";
+  const triageIconColor = isTriageResolved ? "#6bcb77" : isTriageInProcess ? "#ffd83d" : isTriagePending ? "#fca5a5" : "#94a3b8";
 
   // ── Loading ────────────────────────────────────────────────────────────────
   if (loading) {
@@ -674,22 +689,27 @@ export default function PatientDetailPage() {
             }}>
               <div style={{
                 width: 32, height: 32, borderRadius: 8,
-                background: isTriageResolved ? "rgba(107,203,119,0.25)" : isTriageAcknowledged ? "rgba(191,219,254,0.35)" : "rgba(255,193,7,0.65)",
+                background: isTriageResolved ? "rgba(107,203,119,0.25)" : isTriageInProcess ? "rgba(255,193,7,0.65)" : isTriagePending ? "rgba(220,38,38,0.25)" : "rgba(148,163,184,0.25)",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 flexShrink: 0,
               }}>
-                {isTriageResolved ? <CheckCircle2 size={16} color={triageIconColor} /> : isTriageAcknowledged ? <Info size={16} color={triageIconColor} /> : <Activity size={16} color={triageIconColor} />}
+                {isTriageResolved ? <CheckCircle2 size={16} color={triageIconColor} /> : isTriageInProcess ? <Activity size={16} color={triageIconColor} /> : isTriagePending ? <AlertTriangle size={16} color={triageIconColor} /> : <Info size={16} color="#94a3b8" />}
               </div>
               <div style={{ minWidth: 0, flex: "1 1 0" }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,1)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 2 }}>Triage</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: isTriageResolved ? "#3eff57" : isTriageAcknowledged ? "#fefefe" : "#ffd93d" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,1)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 2 }}>Alert Status</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: isTriageResolved ? "#3eff57" : isTriageInProcess ? "#ffd93d" : isTriagePending ? "#fca5a5" : "rgba(255,255,255,0.6)" }}>
                   {triageLabel}
                 </div>
-                {patient.resolved_reason && <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 1)", marginTop: 1, maxWidth: "100%", overflowWrap: "break-word", wordBreak: "break-word", whiteSpace: "normal" }}>{patient.resolved_reason}</div>}
-                {(patient.triage_updated_by_name || patient.triage_updated_at) && (
+                {latestAlert?.resolution_note && <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 1)", marginTop: 1, maxWidth: "100%", overflowWrap: "break-word", wordBreak: "break-word", whiteSpace: "normal" }}>{latestAlert.resolution_note}</div>}
+                {(isTriageInProcess && latestAlert?.in_process_at) && (
                   <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 1)", marginTop: 6, lineHeight: 1.4 }}>
-                    {patient.triage_updated_by_name ? `Updated by ${patient.triage_updated_by_name}` : patient.triage_updated_by ? `Updated by ${patient.triage_updated_by}` : null}
-                    {patient.triage_updated_at ? ` · ${fmtTime(patient.triage_updated_at)}` : null}
+                    {`In process since · ${fmtTime(latestAlert.in_process_at!)}`}
+                  </div>
+                )}
+                {(isTriageResolved && latestAlert?.resolved_at) && (
+                  <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 1)", marginTop: 6, lineHeight: 1.4 }}>
+                    {`Resolved · ${fmtTime(latestAlert.resolved_at!)}`}
+                    {latestAlert.resolution_category && ` · ${latestAlert.resolution_category.replace(/_/g, " ")}`}
                   </div>
                 )}
               </div>
@@ -1097,27 +1117,27 @@ export default function PatientDetailPage() {
         <SectionCard title="Personal Information" icon={User} accent="#1D9E75">
           <div className="personal-info-grid">
             {[
-              { label: "Full Name",         value: patient.name ?? "—" },
-              { label: "Patient ID",        value: patient.readable_id ?? "—" },
-              { label: "Age",               value: patient.age ? `${patient.age} years` : "—" },
-              { label: "Gender",            value: patient.gender ? (patient.gender.charAt(0).toUpperCase() + patient.gender.slice(1)) : "—" },
-              { label: "Phone",             value: patient.phone ?? "—" },
-              { label: "Relative's Phone",  value: patient.relative_phone ?? "—" },
-              { label: "State",             value: patient.state ?? "—" },
-              { label: "District",          value: patient.district ?? "—" },
-              { label: "Address",           value: patient.address_line ?? "—" },
-              { label: "Department",        value: patient.department_name ?? "—" },
-              { label: "Diagnosis",         value: patient.diagnosis ?? "—" },
-              { label: "Condition Type",    value: patient.condition_type ? (patient.condition_type.charAt(0).toUpperCase() + patient.condition_type.slice(1)) : "—" },
-              { label: "Risk Category",     value: patient.risk_category ? rm.label : "—" },
-              { label: "Consent Given",     value: patient.consent_given ? "Yes" : "No" },
-              { label: "Monitoring Days",   value: patient.monitoring_days ? `${patient.monitoring_days} days` : "—" },
-              { label: "Monitoring Start",  value: fmt(patient.monitoring_start) },
-              { label: "Monitoring End",    value: fmt(patient.monitoring_end) },
-              { label: "Registered On",     value: fmtTime(patient.created_at) },
-              { label: "First Login",       value: fmtTime(patient.first_login_at) },
-              { label: "Last Submission",   value: fmtTime(patient.last_submission_at) },
-              { label: "Registered By",     value: patient.basic_registered_by_name ?? "—" },
+              { label: "Full Name", value: patient.name ?? "—" },
+              { label: "Patient ID", value: patient.readable_id ?? "—" },
+              { label: "Age", value: patient.age ? `${patient.age} years` : "—" },
+              { label: "Gender", value: patient.gender ? (patient.gender.charAt(0).toUpperCase() + patient.gender.slice(1)) : "—" },
+              { label: "Phone", value: patient.phone ?? "—" },
+              { label: "Relative's Phone", value: patient.relative_phone ?? "—" },
+              { label: "State", value: patient.state ?? "—" },
+              { label: "District", value: patient.district ?? "—" },
+              { label: "Address", value: patient.address_line ?? "—" },
+              { label: "Department", value: patient.department_name ?? "—" },
+              { label: "Diagnosis", value: patient.diagnosis ?? "—" },
+              { label: "Condition Type", value: patient.condition_type ? (patient.condition_type.charAt(0).toUpperCase() + patient.condition_type.slice(1)) : "—" },
+              { label: "Risk Category", value: patient.risk_category ? rm.label : "—" },
+              { label: "Consent Given", value: patient.consent_given ? "Yes" : "No" },
+              { label: "Monitoring Days", value: patient.monitoring_days ? `${patient.monitoring_days} days` : "—" },
+              { label: "Monitoring Start", value: fmt(patient.monitoring_start) },
+              { label: "Monitoring End", value: fmt(patient.monitoring_end) },
+              { label: "Registered On", value: fmtTime(patient.created_at) },
+              { label: "First Login", value: fmtTime(patient.first_login_at) },
+              { label: "Last Submission", value: fmtTime(patient.last_submission_at) },
+              { label: "Registered By", value: patient.basic_registered_by_name ?? "—" },
               { label: "Medically Reg. By", value: patient.medical_registered_by_name ?? "—" },
             ].map(item => (
               <div key={item.label} style={{ padding: "14px 16px", borderRadius: 14, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
