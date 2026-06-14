@@ -113,6 +113,8 @@ interface HistoryAlert {
   created_at: string;
   resolved_at: string | null;
   in_process_at: string | null;
+  escalated_at: string | null;
+  escalated_at_ist: string | null;
   resolution_note: string | null;
   resolution_category: string | null;
   in_process_by_name: string | null;
@@ -120,6 +122,14 @@ interface HistoryAlert {
   reminder_count: number;
   escalated: boolean;
   submission_day_number: number | null;
+  reminder_details?: Array<{
+    sent_to_phone: string;
+    sent_to_role: string;
+    type: string;
+    channel: string;
+    status: string;
+    sent_at: string;
+  }>;
 }
 
 interface BasdaiPoint {
@@ -129,11 +139,17 @@ interface BasdaiPoint {
   trendStatus: string;
 }
 
+interface OverrideAnswerEntry {
+  question_text: string;
+  display_order: number;
+  triggered: boolean;
+}
+
 interface OverridePoint {
   dayNumber: number;
   date: string;
   overrideTriggered: boolean;
-  overrideAnswers: Record<string, boolean>;
+  overrideAnswers: Record<string, OverrideAnswerEntry>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,6 +172,59 @@ function fmtShort(iso: string | null | undefined): string {
 function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatScore(value: number | string | null | undefined): string {
+  if (value == null) return "—";
+  const n = typeof value === "number" ? value : Number(value);
+  if (Number.isNaN(n)) return "—";
+  return n.toFixed(1);
+}
+
+function addDaysIso(startIso: string, days: number): string {
+  const date = new Date(startIso);
+  date.setDate(date.getDate() + days);
+  return date.toISOString();
+}
+
+function buildDayDate(startIso: string, dayNumber: number): string {
+  return addDaysIso(startIso, dayNumber - 1);
+}
+
+function isSameOrBeforeToday(iso: string): boolean {
+  const date = new Date(iso);
+  const normalized = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const today = new Date();
+  const todayNormalized = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return normalized.getTime() <= todayNormalized.getTime();
+}
+
+// Prefer *_ist timestamp fields when present (API sometimes returns *_ist keys)
+function pickAlertIso(alert: any, keyBase: "created_at" | "in_process_at" | "resolved_at" | "escalated_at") {
+  if (!alert) return null;
+  // prefer exact field
+  if (alert[keyBase]) return alert[keyBase];
+  // then try *_ist variant
+  const istKey = `${keyBase}_ist`;
+  if (istKey in alert && alert[istKey]) return alert[istKey];
+  return null;
+}
+
+function transformOverridePoint(raw: any): OverridePoint {
+  const answers = raw.overrideAnswers ?? {};
+  return {
+    dayNumber: raw.dayNumber,
+    date: raw.date,
+    overrideTriggered: raw.overrideTriggered === true,
+    overrideAnswers: Object.fromEntries(Object.entries(answers).map(([key, value]) => {
+      const answer = value as any;
+      return [key, {
+        question_text: answer?.question_text ?? "",
+        display_order: Number(answer?.display_order ?? 0),
+        triggered: answer?.triggered === true,
+      }];
+    })),
+  };
 }
 
 function monitoringProgress(start: string, end: string, totalDays: number) {
@@ -243,9 +312,10 @@ function SectionCard({ title, icon: Icon, children, accent = "#378ADD" }: {
 interface ChartPoint {
   dayNumber: number;
   date: string;
-  value: number;
+  value: number | null;
   trendStatus?: string; // for BASDAI: "red" | "green" | "yellow"
   overrideTriggered?: boolean;
+  missing?: boolean;
 }
 
 interface CustomLineChartProps {
@@ -297,7 +367,7 @@ function CustomLineChart({
   for (let i = 0; i < data.length - 1; i++) {
     const cur = data[i];
     const next = data[i + 1];
-    // Color the segment by WHERE it's going (next trend) or by whether next > cur
+    if (cur.value == null || next.value == null) continue;
     const isWorsening = next.value > cur.value;
     segments.push({
       x1: xScale(i), y1: yScale(cur.value),
@@ -306,14 +376,21 @@ function CustomLineChart({
     });
   }
 
-  // Override trend line — connect only days that have override=true, shown as dashed purple
-  const overridePath = overrideData.length > 0
-    ? overrideData.map((op, i) => {
+  // Override trend points — plot override events on a separate dashed series across the chart
+  const overrideSeries = overrideData.length > 0
+    ? overrideData.map((op) => {
       const idx = data.findIndex(d => d.dayNumber === op.dayNumber);
       if (idx === -1) return null;
-      return { x: xScale(idx), y: yScale(op.overrideTriggered ? maxY : 0), triggered: op.overrideTriggered };
-    }).filter(Boolean)
-    : [];
+      const base = data[idx];
+      return {
+        dayNumber: op.dayNumber,
+        date: op.date,
+        value: base.value,
+        x: xScale(idx),
+        y: yScale(op.overrideTriggered ? maxY : 0),
+        triggered: op.overrideTriggered,
+      };
+    }).filter(Boolean) as Array<{ dayNumber: number; date: string; value: number; x: number; y: number; triggered: boolean }> : [];
 
   // Y-axis grid lines
   const yTicks = [0, 2, 4, 6, 8, 10].filter(t => t <= maxY);
@@ -323,6 +400,13 @@ function CustomLineChart({
 
   // Day labels (D1, D2...)
   const dayLabels = data.map((d, i) => ({ x: xScale(i), label: `D${d.dayNumber}` }));
+
+  const tooltipLeft = tooltip
+    ? Math.min(Math.max(tooltip.x + 16, 8), Math.max(W - 188, 8))
+    : 0;
+  const tooltipTop = tooltip
+    ? Math.min(Math.max(tooltip.y - 20, 8), Math.max(H - 120, 8))
+    : 0;
 
   return (
     <div style={{ position: "relative", width: "100%", userSelect: "none" }}>
@@ -361,24 +445,26 @@ function CustomLineChart({
         ))}
 
         {/* Override dashed trend line */}
-        {showOverrideLine && overridePath.length >= 2 && (() => {
-          const pts = overridePath as Array<{ x: number; y: number; triggered: boolean }>;
-          // Draw line from each actual override point at y=maxY (10) with dashes to zero
-          return overrideData.map((op, i) => {
-            const idx = data.findIndex(d => d.dayNumber === op.dayNumber);
-            if (idx === -1) return null;
-            const cx = xScale(idx);
-            return (
-              <g key={i}>
-                <line
-                  x1={cx} y1={PAD.top}
-                  x2={cx} y2={PAD.top + chartH}
-                  stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6}
-                />
-              </g>
-            );
-          });
-        })()}
+        {showOverrideLine && overrideSeries.length >= 2 && (
+          <polyline
+            points={overrideSeries.map(pt => `${pt.x},${pt.y}`).join(" ")}
+            fill="none"
+            stroke="#a78bfa"
+            strokeWidth={2}
+            strokeDasharray="6 4"
+            opacity={0.8}
+          />
+        )}
+
+        {showOverrideLine && overrideSeries.map((pt, i) => (
+          <g key={i}
+            onMouseEnter={() => setTooltip({ x: pt.x, y: pt.y, point: { dayNumber: pt.dayNumber, date: pt.date, value: pt.value, overrideTriggered: pt.triggered } })}
+            style={{ cursor: "pointer" }}
+          >
+            <circle cx={pt.x} cy={pt.y} r={5} fill={pt.triggered ? "#fee2e2" : "#dcfce7"} stroke="white" strokeWidth={1.5} />
+            <circle cx={pt.x} cy={pt.y} r={3} fill={pt.triggered ? "#dc2626" : "#16a34a"} />
+          </g>
+        ))}
 
         {/* Colored line segments */}
         {segments.map((seg, i) => (
@@ -399,6 +485,15 @@ function CustomLineChart({
         {/* Dots */}
         {data.map((d, i) => {
           const cx = xScale(i);
+          if (d.value == null) {
+            const cy = PAD.top + chartH - 10;
+            return (
+              <g key={i} onMouseEnter={() => setTooltip({ x: cx, y: cy, point: d })} style={{ cursor: "pointer" }}>
+                <circle cx={cx} cy={cy} r={8} fill="#f8fafc" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="3 3" />
+                <text x={cx} y={cy + 4} textAnchor="middle" fontSize={10} fontWeight={700} fill="#64748b" fontFamily="sans-serif">—</text>
+              </g>
+            );
+          }
           const cy = yScale(d.value);
           const dotColor = getDotColor(d.value);
           return (
@@ -407,9 +502,9 @@ function CustomLineChart({
               style={{ cursor: "pointer" }}
             >
               {/* Outer ring */}
-              <circle cx={cx} cy={cy} r={13} fill={`${dotColor}22`} />
+              <circle cx={cx} cy={cy} r={14} fill={d.overrideTriggered ? "#a78bfa22" : `${dotColor}22`} />
               <circle cx={cx} cy={cy} r={10} fill="white" stroke={dotColor} strokeWidth={2} />
-              <text x={cx} y={cy + 4} textAnchor="middle" fontSize={10} fontWeight={800} fill={dotColor} fontFamily="sans-serif">{d.value}</text>
+              <text x={cx} y={cy + 4} textAnchor="middle" fontSize={10} fontWeight={800} fill={dotColor} fontFamily="sans-serif">{formatScore(d.value)}</text>
             </g>
           );
         })}
@@ -422,7 +517,7 @@ function CustomLineChart({
           const cy = PAD.top + chartH + 8;
           return (
             <circle key={i} cx={cx} cy={cy} r={5}
-              fill={op.overrideTriggered ? "#a78bfa" : "#22c55e"}
+              fill={op.overrideTriggered ? "#dc2626" : "#16a34a"}
               stroke="white" strokeWidth={1.5}
             />
           );
@@ -441,8 +536,8 @@ function CustomLineChart({
       {tooltip && (
         <div style={{
           position: "absolute",
-          left: tooltip.x + 16,
-          top: tooltip.y - 20,
+          left: tooltipLeft,
+          top: tooltipTop,
           background: "white",
           border: "1.5px solid #e2e8f0",
           borderRadius: 12,
@@ -451,19 +546,31 @@ function CustomLineChart({
           pointerEvents: "none",
           zIndex: 10,
           minWidth: 130,
+          maxWidth: 180,
         }}>
           <div style={{ fontWeight: 700, fontSize: 13, color: "#0f172a", marginBottom: 4 }}>Day {tooltip.point.dayNumber}</div>
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>{fmt(tooltip.point.date)}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 22, fontWeight: 800, color: getDotColor(tooltip.point.value) }}>{tooltip.point.value}</span>
-            <span style={{
-              fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 99,
-              background: getScoreColor(tooltip.point.value).background,
-              color: getScoreColor(tooltip.point.value).color,
-            }}>
-              {tooltip.point.value < 4 ? "Low" : tooltip.point.value < 6 ? "Medium" : "High"}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            {tooltip.point.value == null ? (
+              <span style={{ fontSize: 14, fontWeight: 700, color: "#64748b" }}>Not submitted</span>
+            ) : (
+              <>
+                <span style={{ fontSize: 22, fontWeight: 800, color: getDotColor(tooltip.point.value) }}>{formatScore(tooltip.point.value)}</span>
+                <span style={{
+                  fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 99,
+                  background: getScoreColor(tooltip.point.value).background,
+                  color: getScoreColor(tooltip.point.value).color,
+                }}>
+                  {tooltip.point.value < 4 ? "Low" : tooltip.point.value < 6 ? "Medium" : "High"}
+                </span>
+              </>
+            )}
           </div>
+          {tooltip.point.overrideTriggered && (
+            <div style={{ fontSize: 11, color: "#7c3aed", fontWeight: 700, textTransform: "uppercase" }}>
+              Override triggered
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -489,7 +596,7 @@ export default function PatientDetailPage() {
   const [selectedQKey, setSelectedQKey] = useState<string>("");
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
   const [historyAlerts, setHistoryAlerts] = useState<HistoryAlert[]>([]);
-
+  const [reminderModalAlert, setReminderModalAlert] = useState<any>(null);
 
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
@@ -528,7 +635,7 @@ export default function PatientDetailPage() {
         if (qs.length > 0) setSelectedQKey(qs[0].question_key);
         setSubmissions(h?.submissions ?? []);
         setBasdaiGraph(h?.basdaiGraph ?? []);
-        setOverrideGraph(h?.overrideGraph ?? []);
+        setOverrideGraph(Array.isArray(h?.overrideGraph) ? h.overrideGraph.map(transformOverridePoint) : []);
         setHistoryAlerts(h?.alerts ?? []);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Something went wrong.");
@@ -547,41 +654,81 @@ export default function PatientDetailPage() {
     ? monitoringProgress(patient.monitoring_start, patient.monitoring_end, patient.monitoring_days)
     : { daysPassed: 0, pct: 0 };
 
+  const allDayNumbers = patient ? Array.from({ length: patient.monitoring_days }, (_, i) => i + 1) : [];
+  const visibleDayNumbers = useMemo(() => {
+    if (!patient) return [] as number[];
+    return allDayNumbers.filter(day => isSameOrBeforeToday(buildDayDate(patient.monitoring_start, day)));
+  }, [patient, allDayNumbers]);
+  const submissionByDay = useMemo(() => new Map(submissions.map(s => [s.day_number, s])), [submissions]);
+
+  const submissionHistory = useMemo(() => {
+    if (!patient) return [] as (Submission & { missingSubmission?: boolean })[];
+    return visibleDayNumbers.map(day => {
+      const existing = submissionByDay.get(day);
+      if (existing) return { ...existing, missingSubmission: false };
+      return {
+        id: `missing-${day}`,
+        day_number: day,
+        answers: {},
+        override_answers: {},
+        disease_score: 0,
+        trend_status: "",
+        priority_value: 0,
+        override_triggered: false,
+        images: [],
+        submitted_at: buildDayDate(patient.monitoring_start, day),
+        missingSubmission: true,
+      } as Submission & { missingSubmission: true };
+    });
+  }, [patient, visibleDayNumbers, submissionByDay]);
+
   // BASDAI chart data
-  const basdaiChartData: ChartPoint[] = useMemo(() =>
-    [...basdaiGraph]
-      .sort((a, b) => a.dayNumber - b.dayNumber)
-      .map(p => ({ dayNumber: p.dayNumber, date: p.date, value: p.diseaseScore, trendStatus: p.trendStatus })),
-    [basdaiGraph]
-  );
+  const basdaiChartData: ChartPoint[] = useMemo(() => {
+    if (!patient) return [];
+    const overrideMap = new Map(overrideGraph.map(op => [op.dayNumber, op.overrideTriggered]));
+    const basdaiByDay = new Map(basdaiGraph.map(p => [p.dayNumber, p]));
+    return visibleDayNumbers.map(day => {
+      const point = basdaiByDay.get(day);
+      return {
+        dayNumber: day,
+        date: point?.date ?? buildDayDate(patient.monitoring_start, day),
+        value: point?.diseaseScore ?? null,
+        trendStatus: point?.trendStatus,
+        overrideTriggered: overrideMap.get(day) ?? false,
+        missing: point == null,
+      };
+    });
+  }, [patient, basdaiGraph, overrideGraph, visibleDayNumbers]);
 
   // Trend summary
   const basdaiTrend = useMemo(() => {
-    if (basdaiChartData.length < 2) return null;
-    const first = basdaiChartData[0].value;
-    const last = basdaiChartData[basdaiChartData.length - 1].value;
+    const realPoints = basdaiChartData.filter(d => d.value != null);
+    if (realPoints.length < 2) return null;
+    const first = realPoints[0].value!;
+    const last = realPoints[realPoints.length - 1].value!;
     const diff = last - first;
     return { diff, isDown: diff < 0 };
   }, [basdaiChartData]);
 
   // Question-wise data
   const selectedQuestion = questions.find(q => q.question_key === selectedQKey);
-  const qChartData: ChartPoint[] = useMemo(() =>
-    [...submissions]
-      .sort((a, b) => a.day_number - b.day_number)
-      .map(s => ({
-        dayNumber: s.day_number,
-        date: s.submitted_at,
-        value: s.answers[selectedQKey]?.value ?? 0,
-      }))
-      .filter(d => d.value !== undefined),
-    [submissions, selectedQKey]
-  );
+  const qChartData: ChartPoint[] = useMemo(() => {
+    if (!patient) return [];
+    return visibleDayNumbers.map(day => {
+      const sub = submissionByDay.get(day);
+      return {
+        dayNumber: day,
+        date: sub?.submitted_at ?? buildDayDate(patient.monitoring_start, day),
+        value: sub ? (sub.answers?.[selectedQKey]?.value ?? null) : null,
+        missing: !sub,
+      };
+    });
+  }, [patient, selectedQKey, submissionByDay, visibleDayNumbers]);
 
   const Q_COLORS = ["#22c55e", "#378ADD", "#a855f7", "#f59e0b", "#ec4899", "#14b8a6"];
 
-  // Sorted submissions descending
-  const sortedSubs = [...submissions].sort((a, b) => b.day_number - a.day_number);
+  // Sorted submissions descending, including missing-day placeholders
+  const sortedSubs = useMemo(() => [...submissionHistory].sort((a, b) => b.day_number - a.day_number), [submissionHistory]);
 
   // Derive alert status from activeAlerts (most recent non-resolved alert)
   // GET /doctor/patients/:id returns activeAlerts[] from the real alert table
@@ -628,9 +775,9 @@ export default function PatientDetailPage() {
             <div className="heading-font" style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Failed to load</div>
             <div style={{ color: "#64748b", marginBottom: 20 }}>{error ?? "Patient not found."}</div>
             <button
-              onClick={() => router.push("/dashboard")}
+              onClick={() => router.back()}
               style={{ padding: "10px 24px", borderRadius: 12, background: "#378ADD", color: "white", border: "none", fontWeight: 600, cursor: "pointer", fontSize: 14 }}
-            >← Back to Dashboard</button>
+            >← Back</button>
           </div>
         </main>
       </div>
@@ -646,14 +793,32 @@ export default function PatientDetailPage() {
         <button
           onClick={() => router.back()}
           style={{
-            display: "inline-flex", alignItems: "center", gap: 8,
-            background: "none", border: "none", cursor: "pointer",
-            color: "#64748b", fontSize: 14, fontWeight: 600,
-            padding: "4px 0", marginBottom: 20,
-            transition: "color 0.15s",
+            position: "sticky",
+            top: 10,
+            zIndex: 20,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            background: "rgb(55, 138, 221)",
+            cursor: "pointer",
+            color: "white",
+            borderRadius: 8,
+            fontSize: 14,
+            fontWeight: 600,
+            padding: "8px 8px",
+            border: "2px solid #c4d3e1",
+            marginBottom: 10,
+            transition: "box-shadow 0.3s ease, transform 0.2s ease",
           }}
-          onMouseEnter={e => (e.currentTarget.style.color = "#378ADD")}
-          onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.boxShadow =
+              "0 8px 20px rgba(55, 138, 221, 0.4)";
+            e.currentTarget.style.transform = "translateY(-2px)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.boxShadow = "none";
+            e.currentTarget.style.transform = "translateY(0)";
+          }}
         >
           <ArrowLeft size={16} />
           Back
@@ -766,14 +931,14 @@ export default function PatientDetailPage() {
             <div className="header-stat-item">
               <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.8)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Diagnosis</div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "white", lineHeight: 1.3 }}>{patient.diagnosis ?? "—"}</div>
-              {patient.condition_type && <div style={{ marginTop: 5, fontSize: 11, color: "rgba(255,255,255,0.55)", fontWeight: 500 }}>{patient.condition_type.charAt(0).toUpperCase() + patient.condition_type.slice(1)} condition</div>}
+              {patient.condition_type && <div style={{ marginTop: 5, fontSize: 11, color: "rgba(255,255,255,0.55)", fontWeight: 500 }}>{patient.condition_type.charAt(0).toUpperCase() + patient.condition_type.slice(1)} Patient</div>}
             </div>
             <div className="header-stat-divider" />
             <div className="header-stat-item">
               <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.8)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Latest Score</div>
               {latestSub ? (
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                  <span style={{ fontSize: 32, fontWeight: 800, color: getScoreColor(latestSub.disease_score).color, lineHeight: 1 }}>{latestSub.disease_score}</span>
+                  <span style={{ fontSize: 32, fontWeight: 800, color: getScoreColor(latestSub.disease_score).color, lineHeight: 1 }}>{formatScore(latestSub.disease_score)}</span>
                   <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: getScoreColor(latestSub.disease_score).background, color: getScoreColor(latestSub.disease_score).color }}>
                     {latestSub.disease_score < 4 ? "Low" : latestSub.disease_score < 6 ? "Medium" : "High"}
                   </span>
@@ -818,7 +983,7 @@ export default function PatientDetailPage() {
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {questions.map((q, i) => {
                   const enrichedAnswer = latestSub
-                    ? (submissions.find(s => s.day_number === latestSub.day_number)?.answers[q.question_key] ?? null)
+                    ? (submissions.find(s => s.day_number === latestSub.day_number)?.answers?.[q.question_key] ?? null)
                     : null;
                   const latestAnswer = enrichedAnswer != null ? enrichedAnswer.value : null;
                   return (
@@ -829,8 +994,8 @@ export default function PatientDetailPage() {
                           <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{q.question_text}</div>
                         </div>
                         {latestAnswer !== null && (
-                          <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: latestAnswer >= 7 ? "#fee2e2" : latestAnswer >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            <span style={{ fontWeight: 800, fontSize: 14, color: latestAnswer >= 7 ? "#dc2626" : latestAnswer >= 4 ? "#a16207" : "#15803d" }}>{latestAnswer}</span>
+                          <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: latestAnswer >= 6 ? "#fee2e2" : latestAnswer >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <span style={{ fontWeight: 800, fontSize: 14, color: latestAnswer >= 6 ? "#dc2626" : latestAnswer >= 4 ? "#a16207" : "#15803d" }}>{latestAnswer}</span>
                           </div>
                         )}
                       </div>
@@ -849,8 +1014,9 @@ export default function PatientDetailPage() {
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 {overrideQs.map((q) => {
                   const latestOverrideEntry = overrideGraph.find(og => og.dayNumber === (latestSub?.day_number ?? 0));
-                  const triggered = latestOverrideEntry?.overrideAnswers[q.question_key] === true
-                    ? true : latestOverrideEntry !== undefined ? false : null;
+                  const triggered = latestOverrideEntry
+                    ? latestOverrideEntry.overrideAnswers[q.question_key]?.triggered === true
+                    : null;
                   return (
                     <div key={q.question_key} style={{
                       padding: "16px", borderRadius: 14,
@@ -871,7 +1037,7 @@ export default function PatientDetailPage() {
                       <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center" }}>
                         <span style={{ fontSize: 11, color: "#94a3b8", marginRight: 4 }}>History:</span>
                         {overrideGraph.map(og => {
-                          const val = og.overrideAnswers[q.question_key];
+                          const val = og.overrideAnswers[q.question_key]?.triggered;
                           return (
                             <div key={og.dayNumber} title={`Day ${og.dayNumber} (${fmt(og.date)}): ${val ? "Triggered" : "Clear"}`}
                               style={{ width: 22, height: 22, borderRadius: "50%", background: val ? "#dc2626" : "#15803d", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "white", cursor: "default" }}>
@@ -934,16 +1100,23 @@ export default function PatientDetailPage() {
                   <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>BASDAI Worsening</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <div style={{ width: 28, height: 2, background: "#a78bfa", borderRadius: 2, borderTop: "2px dashed #a78bfa" }} />
-                  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Override trend</span>
+                  <div style={{
+    width: 28,
+    borderTop: "3px dotted #a78bfa",
+  }} />
+                  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Override graph</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#a78bfa" }} />
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#dc2626" }} />
                   <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Override: Yes</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e" }} />
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#16a34a" }} />
                   <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Override: No</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", border: "1.5px dashed #94a3b8", background: "#f8fafc" }} />
+                  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Missing day</span>
                 </div>
                 {basdaiTrend && (
                   <div style={{
@@ -1045,6 +1218,10 @@ export default function PatientDetailPage() {
                     <span style={{ fontSize: 12, color: "#64748b" }}>{item.label}</span>
                   </div>
                 ))}
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", border: "1.5px dashed #94a3b8", background: "#f8fafc" }} />
+                  <span style={{ fontSize: 12, color: "#64748b" }}>Missing day</span>
+                </div>
               </div>
             </>
           )}
@@ -1060,92 +1237,109 @@ export default function PatientDetailPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {sortedSubs.map((sub) => {
                 const isOpen = expandedDay === sub.day_number;
-                const hasOverride = sub.override_triggered;
+                const isMissing = (sub as any).status === "missed" || (sub as any).missingSubmission === true;
+                const hasOverride = !isMissing && sub.override_triggered === true;
                 return (
-                  <div key={sub.id} style={{ borderRadius: 16, border: `1.5px solid ${isOpen ? "#378ADD33" : "#f1f5f9"}`, overflow: "hidden", transition: "border-color 0.2s" }}>
+                  <div key={sub.id ?? `missing-${sub.day_number}`} style={{ borderRadius: 16, border: `1.5px solid ${isOpen ? "#378ADD33" : "#f1f5f9"}`, overflow: "hidden", transition: "border-color 0.2s" }}>
                     <button
                       onClick={() => setExpandedDay(isOpen ? null : sub.day_number)}
                       style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", background: isOpen ? "#f0f7ff" : "#f8fafc", border: "none", cursor: "pointer", transition: "background 0.15s", gap: 12 }}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
                         <div className="heading-font" style={{ fontSize: 16, fontWeight: 800, color: isOpen ? "#378ADD" : "#0f172a" }}>Day {sub.day_number}</div>
-                        <span style={{ fontSize: 11, color: "#94a3b8" }}>{fmtTime(sub.submitted_at)}</span>
-                        {hasOverride && <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#fee2e2", color: "#dc2626" }}>🚨 Override</span>}
+                        {!isMissing && <span style={{ fontSize: 11, color: "#94a3b8" }}>{fmtTime(sub.submitted_at)}</span>}
+                        {isMissing ? (
+                          <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#f1f5f9", color: "#64748b" }}>Not submitted</span>
+                        ) : hasOverride ? (
+                          <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#fee2e2", color: "#dc2626" }}>🚨 Override</span>
+                        ) : null}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: getScoreColor(sub.disease_score).background, color: getScoreColor(sub.disease_score).color }}>
-                          {sub.disease_score} — {sub.disease_score < 4 ? "Low" : sub.disease_score < 6 ? "Medium" : "High"}
-                        </span>
+                        {isMissing ? (
+                          <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: "#f1f5f9", color: "#64748b" }}>—</span>
+                        ) : (
+                          <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: getScoreColor(sub.disease_score).background, color: getScoreColor(sub.disease_score).color }}>
+                            {formatScore(sub.disease_score)} — {sub.disease_score < 4 ? "Low" : sub.disease_score < 6 ? "Medium" : "High"}
+                          </span>
+                        )}
                         {isOpen ? <ChevronUp size={16} color="#94a3b8" /> : <ChevronDown size={16} color="#94a3b8" />}
                       </div>
                     </button>
                     {isOpen && (
                       <div style={{ padding: "20px", borderTop: "1px solid #f1f5f9", background: "white" }}>
-                        <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-                          {[
-                            { label: "Disease Score", value: sub.disease_score, color: getScoreColor(sub.disease_score).color, bg: getScoreColor(sub.disease_score).background },
-                            { label: "Priority Value", value: sub.priority_value, color: "#a855f7", bg: "#faf5ff" },
-                          ].map(stat => (
-                            <div key={stat.label} style={{ padding: "12px 20px", borderRadius: 14, background: stat.bg, display: "flex", flexDirection: "column", alignItems: "center" }}>
-                              <span style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase" }}>{stat.label}</span>
-                              <span className="heading-font" style={{ fontSize: 24, fontWeight: 800, color: stat.color, marginTop: 2 }}>{stat.value}</span>
-                            </div>
-                          ))}
-                        </div>
-                        {Object.keys(sub.answers).length > 0 && (
+                        {isMissing ? (
+                          <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.7 }}>
+                            No submission was recorded for this day. The patient did not submit their daily report.
+                          </div>
+                        ) : (
                           <>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 12 }}>Symptom Answers</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-                              {Object.entries(sub.answers)
-                                .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
-                                .map(([key, ans], i) => (
-                                  <div key={key} style={{ padding: "10px 14px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                                      <div style={{ flex: 1, paddingRight: 10 }}>
-                                        <span style={{ fontSize: 10, fontWeight: 800, color: Q_COLORS[i % Q_COLORS.length], textTransform: "uppercase", letterSpacing: "0.07em" }}>Q{i + 1}</span>
-                                        <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{ans.question_text}</div>
-                                      </div>
-                                      <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: ans.value >= 7 ? "#fee2e2" : ans.value >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                        <span style={{ fontWeight: 800, fontSize: 14, color: ans.value >= 7 ? "#dc2626" : ans.value >= 4 ? "#a16207" : "#15803d" }}>{ans.value}</span>
-                                      </div>
-                                    </div>
-                                    <ScoreBar value={ans.value} max={ans.max_value} />
-                                  </div>
-                                ))}
-                            </div>
-                          </>
-                        )}
-                        {Object.keys(sub.override_answers).length > 0 && (
-                          <>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Override Alerts</div>
-                            {Object.entries(sub.override_answers)
-                              .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
-                              .map(([key, ans]) => (
-                                <div key={key} style={{
-                                  padding: "10px 14px", borderRadius: 10,
-                                  background: ans.triggered ? "#fef2f2" : "#f0fdf4",
-                                  border: `1px solid ${ans.triggered ? "#fca5a5" : "#86efac"}`,
-                                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                                  fontSize: 13, marginBottom: 8,
-                                }}>
-                                  <span style={{ color: "#374151" }}>{ans.question_text}</span>
-                                  <span style={{ fontWeight: 700, color: ans.triggered ? "#dc2626" : "#15803d", flexShrink: 0, marginLeft: 12 }}>
-                                    {ans.triggered ? "🚨 Triggered" : "✓ Clear"}
-                                  </span>
+                            <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+                              {[
+                                { label: "Disease Score", value: formatScore(sub.disease_score), color: getScoreColor(sub.disease_score).color, bg: getScoreColor(sub.disease_score).background },
+                                { label: "Priority Value", value: sub.priority_value, color: "#a855f7", bg: "#faf5ff" },
+                              ].map(stat => (
+                                <div key={stat.label} style={{ padding: "12px 20px", borderRadius: 14, background: stat.bg, display: "flex", flexDirection: "column", alignItems: "center" }}>
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em" }}>{stat.label}</span>
+                                  <span className="heading-font" style={{ fontSize: 24, fontWeight: 800, color: stat.color, marginTop: 2 }}>{stat.value}</span>
                                 </div>
                               ))}
-                          </>
-                        )}
-                        {sub.images && sub.images.length > 0 && (
-                          <div style={{ marginTop: 12 }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 10 }}>Attached Images</div>
-                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                              {sub.images.map((img, idx) => (
-                                <img key={idx} src={img} alt={`Submission image ${idx + 1}`}
-                                  style={{ width: 80, height: 80, borderRadius: 10, objectFit: "cover", border: "1px solid #e2e8f0" }} />
-                              ))}
                             </div>
-                          </div>
+                            {sub.answers && Object.keys(sub.answers).length > 0 && (
+                              <>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 12 }}>Symptom Answers</div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                                  {Object.entries(sub.answers)
+                                    .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
+                                    .map(([key, ans], i) => (
+                                      <div key={key} style={{ padding: "10px 14px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                                          <div style={{ flex: 1, paddingRight: 10 }}>
+                                            <span style={{ fontSize: 10, fontWeight: 800, color: Q_COLORS[i % Q_COLORS.length], textTransform: "uppercase", letterSpacing: "0.07em" }}>Q{i + 1}</span>
+                                            <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{ans.question_text}</div>
+                                          </div>
+                                          <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: ans.value >= 6 ? "#fee2e2" : ans.value >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                            <span style={{ fontWeight: 800, fontSize: 14, color: ans.value >= 6 ? "#dc2626" : ans.value >= 4 ? "#a16207" : "#15803d" }}>{ans.value}</span>
+                                          </div>
+                                        </div>
+                                        <ScoreBar value={ans.value} max={ans.max_value} />
+                                      </div>
+                                    ))}
+                                </div>
+                              </>
+                            )}
+                            {sub.override_answers && Object.keys(sub.override_answers).length > 0 && (
+                              <>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Override Alerts</div>
+                                {Object.entries(sub.override_answers)
+                                  .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
+                                  .map(([key, ans]) => (
+                                    <div key={key} style={{
+                                      padding: "10px 14px", borderRadius: 10,
+                                      background: ans.triggered ? "#fef2f2" : "#f0fdf4",
+                                      border: `1px solid ${ans.triggered ? "#fca5a5" : "#86efac"}`,
+                                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                                      fontSize: 13, marginBottom: 8,
+                                    }}>
+                                      <span style={{ color: "#374151" }}>{ans.question_text}</span>
+                                      <span style={{ fontWeight: 700, color: ans.triggered ? "#dc2626" : "#15803d", flexShrink: 0, marginLeft: 12 }}>
+                                        {ans.triggered ? "🚨 Triggered" : "✓ Clear"}
+                                      </span>
+                                    </div>
+                                  ))}
+                              </>
+                            )}
+                            {sub.images && sub.images.length > 0 && (
+                              <div style={{ marginTop: 12 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 10 }}>Attached Images</div>
+                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                  {sub.images.map((img, idx) => (
+                                    <img key={idx} src={img} alt={`Submission image ${idx + 1}`}
+                                      style={{ width: 80, height: 80, borderRadius: 10, objectFit: "cover", border: "1px solid #e2e8f0" }} />
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     )}
@@ -1157,83 +1351,275 @@ export default function PatientDetailPage() {
         </SectionCard>
 
         {/* ══════════════════════════════════════════════════════════════
-            SECTION 6 — ALERT HISTORY
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionCard title="Alert History" icon={AlertTriangle} accent="#dc2626">
-          {historyAlerts.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "32px 0", color: "#94a3b8", fontSize: 14 }}>No alerts recorded for this patient.</div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {historyAlerts.map((alert) => {
-                const isResolved = alert.alert_status === "resolved";
-                const isInProcess = alert.alert_status === "in_process";
-                const alertColor = alert.alert_type === "red" ? "#dc2626" : "#a16207";
-                const alertBg = alert.alert_type === "red" ? "#fee2e2" : "#fef9c3";
-                const statusColor = isResolved ? "#15803d" : isInProcess ? "#a16207" : "#dc2626";
-                const statusBg = isResolved ? "#dcfce7" : isInProcess ? "#fef9c3" : "#fee2e2";
-                const statusLabel = isResolved ? "Resolved" : isInProcess ? "In Process" : "Pending";
-                return (
-                  <div key={alert.id} style={{
-                    borderRadius: 16, border: `1.5px solid ${isResolved ? "#86efac" : isInProcess ? "#fde68a" : "#fca5a5"}`,
-                    background: isResolved ? "#f0fdf4" : isInProcess ? "#fffbeb" : "#fef2f2",
-                    overflow: "hidden",
-                  }}>
-                    {/* Alert header row */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", flexWrap: "wrap" }}>
-                      <div style={{ padding: "4px 14px", borderRadius: 99, background: alertBg, color: alertColor, fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                        {alert.alert_type === "red" ? "🔴 Red Alert" : "🟡 Yellow Alert"}
-                      </div>
-                      <div style={{ padding: "4px 14px", borderRadius: 99, background: statusBg, color: statusColor, fontWeight: 700, fontSize: 12 }}>
-                        {statusLabel}
-                      </div>
-                      {alert.submission_day_number != null && (
-                        <div style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>Day {alert.submission_day_number}</div>
-                      )}
-                      {alert.escalated && (
-                        <div style={{ padding: "4px 12px", borderRadius: 99, background: "#fdf2f8", color: "#9333ea", fontWeight: 700, fontSize: 11 }}>⚡ Escalated</div>
-                      )}
-                      <div style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8" }}>{fmtTime(alert.created_at)}</div>
-                    </div>
+                SECTION 6 — ALERT HISTORY
+            ══════════════════════════════════════════════════════════════ */}
 
-                    {/* Resolution details */}
-                    {(isResolved || isInProcess) && (
-                      <div style={{ padding: "0 18px 14px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
-                        {alert.in_process_at && (
-                          <div style={{ fontSize: 12, color: "#64748b" }}>
-                            <span style={{ fontWeight: 700, color: "#a16207" }}>In Process: </span>
-                            {fmtTime(alert.in_process_at)}
-                            {alert.in_process_by_name && <span style={{ color: "#94a3b8" }}> · by {alert.in_process_by_name}</span>}
+            {/* Reminder Details Modal */}
+            {reminderModalAlert && (
+              <div
+                onClick={() => setReminderModalAlert(null)}
+                style={{
+                  position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  zIndex: 400, padding: 16,
+                }}
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    background: "white", borderRadius: 16, width: "100%", maxWidth: 480,
+                    maxHeight: "88vh", display: "flex", flexDirection: "column",
+                    overflow: "hidden", border: "1px solid #e2e8f0",
+                    boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+                  }}
+                >
+                  {/* Modal header */}
+                  <div style={{
+                    padding: "16px 20px", borderBottom: "1px solid #f1f5f9",
+                    display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexShrink: 0,
+                  }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99,
+                          background: reminderModalAlert.alert_type === "red" ? "#fee2e2" : "#fef9c3",
+                          color: reminderModalAlert.alert_type === "red" ? "#dc2626" : "#a16207",
+                        }}>
+                          {reminderModalAlert.alert_type === "red" ? "Red alert" : "Yellow alert"}
+                          {reminderModalAlert.submission_day_number != null ? ` · Day ${reminderModalAlert.submission_day_number}` : ""}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Reminder details</div>
+                    </div>
+                    <button
+                      onClick={() => setReminderModalAlert(null)}
+                      style={{
+                        width: 30, height: 30, borderRadius: 8, border: "1px solid #e2e8f0",
+                        background: "transparent", cursor: "pointer", display: "flex",
+                        alignItems: "center", justifyContent: "center", flexShrink: 0,
+                        color: "#64748b", fontSize: 16,
+                      }}
+                    >✕</button>
+                  </div>
+
+                  {/* Modal meta grid */}
+                  <div style={{
+                    padding: "14px 20px", borderBottom: "1px solid #f1f5f9",
+                    display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flexShrink: 0,
+                  }}>
+                    {[
+                      { label: "Alert triggered", value: fmtTime(pickAlertIso(reminderModalAlert, "created_at")) ? `${fmt(pickAlertIso(reminderModalAlert, "created_at"))}, ${fmtTime(pickAlertIso(reminderModalAlert, "created_at"))}` : "—" },
+                      {
+                        label: "In process by",
+                        value: reminderModalAlert.in_process_by_name
+                          ? `${reminderModalAlert.in_process_by_name} · ${fmtTime(pickAlertIso(reminderModalAlert, "in_process_at"))}`
+                          : "—",
+                      },
+                      ...(reminderModalAlert.escalated_at_ist || reminderModalAlert.escalated_at
+                        ? [{ label: "Escalated at", value: fmtTime(reminderModalAlert.escalated_at_ist || reminderModalAlert.escalated_at) }]
+                        : []),
+                      {
+                        label: "Resolved by",
+                        value: reminderModalAlert.resolved_by_name
+                          ? `${reminderModalAlert.resolved_by_name} · ${fmtTime(pickAlertIso(reminderModalAlert, "resolved_at"))}`
+                          : "—",
+                      },
+                      {
+                        label: "Resolution category",
+                        value: reminderModalAlert.resolution_category
+                          ? reminderModalAlert.resolution_category.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase())
+                          : "—",
+                      },
+                      { label: "Total reminders", value: String((reminderModalAlert.reminder_details ?? []).length) },
+                    ].map((item) => (
+                      <div key={item.label}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{item.label}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: "#0f172a" }}>{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Timeline */}
+                  <div style={{ padding: "14px 20px", overflowY: "auto", flex: 1 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 14 }}>
+                      Notification timeline
+                    </div>
+                    {(reminderModalAlert.reminder_details ?? []).map((r: any, i: number, arr: any[]) => {
+                      const isFirst = i === 0;
+                      const isLast = i === arr.length - 1;
+                      const isEscalation = r.type === "alert_escalation";
+                      const dotCol = isEscalation ? "#9333ea" : isFirst ? "#dc2626" : "#f59e0b";
+                      const actionText = isFirst && !isEscalation ? "Alert sent via WhatsApp"
+                        : isEscalation ? "Escalation sent via WhatsApp"
+                        : "Reminder sent via WhatsApp";
+                      const chipStyle = r.sent_to_role === "doctor"
+                        ? { bg: "#eff6ff", color: "#1d4ed8", border: "#bfdbfe" }
+                        : r.sent_to_role === "escalation"
+                        ? { bg: "#fdf2f8", color: "#9333ea", border: "#e9d5ff" }
+                        : { bg: "#f0fdf4", color: "#166534", border: "#bbf7d0" };
+                      const roleLabel = r.sent_to_role.charAt(0).toUpperCase() + r.sent_to_role.slice(1);
+                      const phoneFormatted = r.sent_to_phone ? `+91 ${r.sent_to_phone.slice(0,5)} ${r.sent_to_phone.slice(5)}` : "";
+                      return (
+                        <div key={i} style={{ display: "flex", gap: 12, marginBottom: isLast ? 0 : 14 }}>
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, width: 12 }}>
+                            <div style={{ width: 10, height: 10, borderRadius: "50%", background: dotCol, flexShrink: 0, marginTop: 3 }} />
+                            {!isLast && <div style={{ width: 1, flex: 1, background: "#e2e8f0", marginTop: 3 }} />}
                           </div>
-                        )}
-                        {isResolved && alert.resolved_at && (
-                          <div style={{ fontSize: 12, color: "#64748b" }}>
-                            <span style={{ fontWeight: 700, color: "#15803d" }}>Resolved: </span>
-                            {fmtTime(alert.resolved_at)}
-                            {alert.resolved_by_name && <span style={{ color: "#94a3b8" }}> · by {alert.resolved_by_name}</span>}
-                          </div>
-                        )}
-                        {alert.resolution_category && (
-                          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "rgba(55,138,221,0.08)", border: "1px solid rgba(55,138,221,0.2)", width: "fit-content" }}>
-                            <Shield size={13} color="#378ADD" />
-                            <span style={{ fontSize: 12, fontWeight: 700, color: "#378ADD" }}>
-                              {alert.resolution_category.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                          <div style={{ flex: 1, minWidth: 0, paddingBottom: isLast ? 0 : 2 }}>
+                            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>{fmtTime(r.sent_at)}</div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", marginBottom: 5 }}>{actionText}</div>
+                            <span style={{
+                              display: "inline-flex", alignItems: "center", gap: 5,
+                              fontSize: 11, padding: "2px 8px", borderRadius: 99,
+                              background: chipStyle.bg, color: chipStyle.color, border: `1px solid ${chipStyle.border}`,
+                            }}>
+                              {roleLabel}{phoneFormatted ? ` · ${phoneFormatted}` : ""}
                             </span>
                           </div>
-                        )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <SectionCard title="Alert History" icon={AlertTriangle} accent="#dc2626">
+              {historyAlerts.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "32px 0", color: "#94a3b8", fontSize: 14 }}>No alerts recorded for this patient.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {historyAlerts.map((alert) => {
+                    const isResolved = alert.alert_status === "resolved";
+                    const isInProcess = alert.alert_status === "in_process";
+                    const alertColor = alert.alert_type === "red" ? "#dc2626" : "#a16207";
+                    const alertBg = alert.alert_type === "red" ? "#fee2e2" : "#fef9c3";
+                    const statusColor = isResolved ? "#15803d" : isInProcess ? "#a16207" : "#dc2626";
+                    const statusBg = isResolved ? "#dcfce7" : isInProcess ? "#fef9c3" : "#fee2e2";
+                    const statusLabel = isResolved ? "Resolved" : isInProcess ? "In process" : "Pending";
+                    const createdIso = pickAlertIso(alert, "created_at");
+                    const inProcessIso = pickAlertIso(alert, "in_process_at");
+                    const resolvedIso = pickAlertIso(alert, "resolved_at");
+                    const escalatedIso = (alert as any).escalated_at_ist || alert.escalated_at || null;
+                    const latestReminderEntry = (alert as any).reminder_details?.length
+                      ? [...((alert as any).reminder_details as any[])].sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime())[0]
+                      : null;
+
+                    const cardBorder = isResolved ? "#86efac" : isInProcess ? "#fde68a" : "#fca5a5";
+                    const cardBg = isResolved ? "#f0fdf4" : isInProcess ? "#fffbeb" : "#fef2f2";
+
+                    return (
+                      <div key={alert.id} style={{ borderRadius: 14, border: `1px solid ${cardBorder}`, background: cardBg, overflow: "hidden" }}>
+                        {/* Top row */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 16px", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99, background: alertBg, color: alertColor, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            {alert.alert_type === "red" ? "Red alert" : "Yellow alert"}
+                          </span>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99, background: statusBg, color: statusColor }}>
+                            {statusLabel}
+                          </span>
+                          {alert.submission_day_number != null && (
+                            <span style={{ fontSize: 11, color: "#64748b", fontWeight: 500, padding: "3px 8px", borderRadius: 99, background: "rgba(255,255,255,0.6)", border: "1px solid #e2e8f0" }}>
+                              Day {alert.submission_day_number}
+                            </span>
+                          )}
+                          {alert.escalated && (
+                            <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99, background: "#fdf2f8", color: "#9333ea" }}>
+                              ⚡ Escalated
+                            </span>
+                          )}
+                          <span style={{ marginLeft: "auto", fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>{fmtTime(createdIso)}</span>
+                        </div>
+
+                        {/* Info grid */}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 8, padding: "0 16px 12px" }}>
+                          {inProcessIso && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>In process at</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>{fmtTime(inProcessIso)}</div>
+                            </div>
+                          )}
+                          {alert.in_process_by_name && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>In process by</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>{alert.in_process_by_name}</div>
+                            </div>
+                          )}
+                          {resolvedIso && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>Resolved at</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>{fmtTime(resolvedIso)}</div>
+                            </div>
+                          )}
+                          {alert.resolved_by_name && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>Resolved by</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>{alert.resolved_by_name}</div>
+                            </div>
+                          )}
+                          {escalatedIso && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>Escalated at</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>{fmtTime(escalatedIso)}</div>
+                            </div>
+                          )}
+                          {alert.resolution_category && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>Resolution category</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>
+                                {alert.resolution_category.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Resolution note */}
                         {alert.resolution_note && (
-                          <div style={{ padding: "10px 14px", borderRadius: 10, background: "white", border: "1px solid #e2e8f0" }}>
-                            <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>Resolution Note</div>
-                            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.5 }}>{alert.resolution_note}</div>
+                          <div style={{ padding: "10px 16px 14px", borderTop: `0px solid ${cardBorder}`,background: "rgb(255, 255, 255)" }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 5 }}>Resolution note</div>
+                            <div style={{ fontSize: 12, color: "#334155", lineHeight: 1.6 }}>{alert.resolution_note}</div>
                           </div>
                         )}
+                        {/* Reminder row */}
+                        <div style={{ padding: "10px 16px", borderTop: `1px solid ${cardBorder}`, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "rgba(255,255,255,0.4)" }}>
+                          <div style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            padding: "5px 12px", borderRadius: 8,
+                            background: "rgba(255,255,255,0.7)", border: "1px solid #e2e8f0",
+                            fontSize: 12, color: "#475569",
+                          }}>
+                            <AlertCircle size={13} color="#94a3b8" />
+                            <span><strong style={{ color: "#0f172a", fontWeight: 700 }}>{alert.reminder_count ?? 0}</strong> reminders</span>
+                            {latestReminderEntry && (
+                              <span style={{ color: "#94a3b8", fontSize: 11 }}>
+                                · Last: {fmt(latestReminderEntry.sent_at)}, {fmtTime(latestReminderEntry.sent_at)}
+                              </span>
+                            )}
+                          </div>
+                          {(alert as any).reminder_details?.length > 0 && (
+                            <button
+                              onClick={() => setReminderModalAlert(alert as any)}
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 6,
+                                padding: "5px 14px", borderRadius: 8,
+                                border: "1px solid #e2e8f0", background: "rgba(255,255,255,0.8)",
+                                fontSize: 12, fontWeight: 600, color: "#378ADD", cursor: "pointer",
+                                transition: "all 0.15s",
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.background = "#f0f7ff"; e.currentTarget.style.borderColor = "#378ADD"; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.8)"; e.currentTarget.style.borderColor = "#e2e8f0"; }}
+                            >
+                              <List size={13} />
+                              Reminder details
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </SectionCard>
+                    );
+                  })}
+                </div>
+              )}
+            </SectionCard>
 
         {/* ══════════════════════════════════════════════════════════════
             SECTION 7 — PERSONAL INFORMATION

@@ -10,7 +10,7 @@ import Link from "next/link";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type SortOption = "none" | "az" | "za" | "risk_high" | "risk_low";
+type SortOption = "none" | "az" | "za" | "risk_high" | "risk_low" | "score_high" | "score_low";
 
 // Resolved alert from GET /doctor/alerts?status=resolved
 interface ResolvedAlert {
@@ -19,6 +19,7 @@ interface ResolvedAlert {
   alert_status: "resolved";
   created_at: string;
   resolved_at: string | null;
+  resolved_at_ist: string | null;
   resolved_by_name: string | null;
   resolution_note: string | null;
   resolution_category: string | null;
@@ -28,8 +29,11 @@ interface ResolvedAlert {
   patient_phone: string;
   risk_category: "low" | "medium" | "high";
   day_number: number | null;
-  disease_score: number | null;
+  disease_score: number | string | null;
   submission_trend: string | null;
+  disease_id?: string;
+  disease_name?: string;
+  diagnosis?: string;
 }
 
 interface Pagination {
@@ -39,16 +43,49 @@ interface Pagination {
   totalPages: number;
 }
 
+interface DiseaseOption {
+  id: string;
+  name: string;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const BASE_URL = "https://api.mediwatch.in";
 
 function getToken(): string {
   if (typeof window === "undefined") return "";
   return localStorage.getItem("doctor_token") ?? "";
 }
 
+function normalizeName(name: string | null | undefined): string {
+  return String(name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatScore(val: number | string | null | undefined): string {
+  if (val == null) return "—";
+  const n = typeof val === "number" ? val : Number(val);
+  if (Number.isNaN(n)) return "—";
+  return n.toFixed(1);
+}
+
+function getScoreColor(score: number | undefined | null) {
+  if (score === undefined || score === null || Number.isNaN(Number(score))) {
+    return { color: "#374151", background: "#f8fafc" };
+  }
+  const n = Number(score);
+  if (n < 4) return { color: "#15803d", background: "#dcfce7" };
+  if (n < 6) return { color: "#a16207", background: "#fef9c3" };
+  return { color: "#dc2626", background: "#fee2e2" };
 }
 
 
@@ -62,27 +99,53 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "none", label: "Default order" },
   { value: "az", label: "Name: A → Z" },
   { value: "za", label: "Name: Z → A" },
+  { value: "score_high", label: "Score: High first" },
+  { value: "score_low", label: "Score: Low first" },
   { value: "risk_high", label: "Risk: High first" },
   { value: "risk_low", label: "Risk: Low first" },
 ];
 
 const STATUS_FILTERS = [
-  { value: "all", label: "All Statuses" },
-  { value: "active", label: "Active" },
-  { value: "inactive", label: "Inactive" },
-  { value: "completed", label: "Completed" },
-  { value: "incomplete", label: "Incomplete" },
-  { value: "pending_login", label: "Pending Login" },
+  { value: "all", label: "All" },
+  { value: "red", label: "Red" },
+  { value: "yellow", label: "Yellow" },
 ];
+
+function compareSort(a: ResolvedAlert, b: ResolvedAlert, sort: SortOption): number {
+  if (sort === "az") return a.patient_name.localeCompare(b.patient_name);
+  if (sort === "za") return b.patient_name.localeCompare(a.patient_name);
+
+  if (sort === "score_high" || sort === "score_low") {
+    const aScore = Number(a.disease_score ?? NaN);
+    const bScore = Number(b.disease_score ?? NaN);
+    if (Number.isNaN(aScore) && Number.isNaN(bScore)) return 0;
+    if (Number.isNaN(aScore)) return 1;
+    if (Number.isNaN(bScore)) return -1;
+    return sort === "score_high" ? bScore - aScore : aScore - bScore;
+  }
+
+  const wa = RISK_META[a.risk_category]?.weight ?? 0;
+  const wb = RISK_META[b.risk_category]?.weight ?? 0;
+  return sort === "risk_high" ? wb - wa : wa - wb;
+}
 
 function sortPatients(patients: ResolvedAlert[], sort: SortOption): ResolvedAlert[] {
   if (sort === "none") return patients;
+  return [...patients].sort((a, b) => compareSort(a, b, sort));
+}
+
+function prioritizeResolvedByDoctor(patients: ResolvedAlert[], doctorName: string, sort: SortOption): ResolvedAlert[] {
+  const currentDoctorKey = normalizeName(doctorName);
+  if (!currentDoctorKey) {
+    return sortPatients(patients, sort);
+  }
+
   return [...patients].sort((a, b) => {
-    if (sort === "az") return a.patient_name.localeCompare(b.patient_name);
-    if (sort === "za") return b.patient_name.localeCompare(a.patient_name);
-    const wa = RISK_META[a.risk_category]?.weight ?? 0;
-    const wb = RISK_META[b.risk_category]?.weight ?? 0;
-    return sort === "risk_high" ? wb - wa : wa - wb;
+    const aIsCurrent = normalizeName(a.resolved_by_name) === currentDoctorKey ? 0 : 1;
+    const bIsCurrent = normalizeName(b.resolved_by_name) === currentDoctorKey ? 0 : 1;
+    if (aIsCurrent !== bIsCurrent) return aIsCurrent - bIsCurrent;
+    if (sort === "none") return 0;
+    return compareSort(a, b, sort);
   });
 }
 
@@ -101,6 +164,11 @@ export default function ResolvedPatientsPage() {
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [currentDoctorName, setCurrentDoctorName] = useState("");
+  const [diseases, setDiseases] = useState<DiseaseOption[]>([]);
+  const [selectedDisease, setSelectedDisease] = useState<string>("all");
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
 
   // Filter dropdown state
   const [filterOpen, setFilterOpen] = useState(false);
@@ -117,11 +185,48 @@ export default function ResolvedPatientsPage() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
+  // Load current doctor profile name for ordering resolved patients
+  useEffect(() => {
+    async function fetchProfile() {
+      const token = getToken();
+      if (!token) return;
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/doctor/profile`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const profile = data?.data || data?.doctor || data;
+        if (profile?.name) setCurrentDoctorName(String(profile.name).trim());
+      } catch {
+        // ignore profile fetch failures; ordering will fallback gracefully
+      }
+    }
+    fetchProfile();
+
+    async function loadDiseases() {
+      const token = getToken();
+      if (!token) return;
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/doctor/diseases`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const result = await res.json();
+        const diseaseList = Array.isArray(result?.data?.diseases) ? result.data.diseases : [];
+        setDiseases(diseaseList.map((d: any) => ({ id: d.id, name: d.name })));
+      } catch {
+        // ignore disease fetch failures; filter remains empty
+      }
+    }
+    loadDiseases();
+  }, []);
+
   // ── Fetch ──────────────────────────────────────────────────────────────────
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
 
-  async function fetchResolvedPatients(search: string, status: string, page: number) {
+  async function fetchResolvedPatients(_search: string, status: string, page: number) {
     setLoading(true);
     setError(null);
     try {
@@ -129,12 +234,11 @@ export default function ResolvedPatientsPage() {
       if (!token) { routerRef.current.replace("/login"); return; }
 
       // Fetch resolved alerts from the real alerts API
-      // GET /doctor/alerts?status=resolved returns alerts with patient info embedded
+      // Frontend search is handled locally by name/readable ID, so do not pass search to the API.
       const params = new URLSearchParams();
       params.set("status", "resolved");
       params.set("page", String(page));
       params.set("limit", String(LIMIT));
-      if (search.trim()) params.set("search", search.trim());
 
       const res = await fetch(
         `https://api.mediwatch.in/api/v1/doctor/alerts?${params}`,
@@ -151,7 +255,11 @@ export default function ResolvedPatientsPage() {
 
       const raw = await res.json();
       const data = raw?.data;
-      const alerts: ResolvedAlert[] = Array.isArray(data?.alerts) ? data.alerts : [];
+      const alerts: ResolvedAlert[] = Array.isArray(data?.alerts) ? data.alerts.map((alert: any) => ({
+        ...alert,
+        disease_id: alert.disease_id ?? alert.disease?.id ?? alert.patient?.disease_id ?? alert.patient_disease_id ?? undefined,
+        disease_name: alert.disease_name ?? alert.disease?.name ?? alert.diagnosis ?? alert.patient?.disease_name ?? alert.patient_disease_name ?? undefined,
+      })) : [];
       const pg = data?.pagination;
 
       setPatients(alerts);
@@ -172,40 +280,93 @@ export default function ResolvedPatientsPage() {
   useEffect(() => {
     const t = setTimeout(() => {
       fetchResolvedPatients(search, statusFilter, page);
-    }, search ? 400 : 0);
+    }, 0);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, statusFilter, page]);
+  }, [statusFilter, page]);
 
   const handleSearch = (v: string) => { setSearch(v); setPage(1); };
   const handleStatus = (v: string) => { setStatusFilter(v); setPage(1); };
 
-  // Derived sorted list
-  const displayedPatients = sortPatients(patients, sortOption);
+  // Derived filtered + sorted list (filtering by alert_type happens on client-side)
+  const searchLower = search.trim().toLowerCase();
+  const filteredPatients = patients.filter(p => {
+    const matchesStatus = statusFilter === "all" || p.alert_type === statusFilter;
+    if (!matchesStatus) return false;
+
+    const selectedDiseaseLower = selectedDisease.toLowerCase();
+    const selectedDiseaseName = diseases.find(d => d.id === selectedDisease)?.name ?? "";
+    const selectedDiseaseNameLower = normalizeName(selectedDiseaseName);
+    const diseaseNameLower = normalizeName(p.disease_name ?? p.diagnosis ?? "");
+    const matchesDisease = selectedDisease === "all" ||
+      String(p.disease_id ?? "").toLowerCase() === selectedDiseaseLower ||
+      diseaseNameLower === selectedDiseaseNameLower ||
+      diseaseNameLower.includes(selectedDiseaseNameLower);
+    if (!matchesDisease) return false;
+
+    if (fromDate || toDate) {
+      const resolvedAt = p.resolved_at_ist ?? p.resolved_at;
+      if (!resolvedAt) return false;
+      const resolvedTime = new Date(resolvedAt).getTime();
+      if (Number.isNaN(resolvedTime)) return false;
+      if (fromDate) {
+        const fromTime = new Date(`${fromDate}T00:00:00`).getTime();
+        if (resolvedTime < fromTime) return false;
+      }
+      if (toDate) {
+        const toTime = new Date(`${toDate}T23:59:59`).getTime();
+        if (resolvedTime > toTime) return false;
+      }
+    }
+
+    if (!searchLower) return true;
+    return (
+      p.patient_name.toLowerCase().includes(searchLower) ||
+      p.patient_readable_id.toLowerCase().includes(searchLower)
+    );
+  });
+
+  const isLocalFilterActive = searchLower.length > 0 || statusFilter !== "all" || selectedDisease !== "all" || fromDate !== "" || toDate !== "";
+  const filteredSortedPatients = prioritizeResolvedByDoctor(filteredPatients, currentDoctorName, sortOption);
+  const filteredTotal = filteredSortedPatients.length;
+  const localTotalPages = Math.max(1, Math.ceil(filteredTotal / LIMIT));
+  const effectiveTotalPages = isLocalFilterActive ? localTotalPages : pagination?.totalPages ?? 1;
+  const effectiveTotal = isLocalFilterActive ? filteredTotal : pagination?.total ?? 0;
+  const effectivePage = Math.min(page, effectiveTotalPages);
+  const displayedPatients = filteredSortedPatients.slice((effectivePage - 1) * LIMIT, effectivePage * LIMIT);
 
   // ── Computed filter label ──────────────────────────────────────────────────
-  const hasFilters = statusFilter !== "all" || sortOption !== "none";
-  const filterBadgeCount = (statusFilter !== "all" ? 1 : 0) + (sortOption !== "none" ? 1 : 0);
+  const hasFilters = statusFilter !== "all" || sortOption !== "none" || search.trim().length > 0 || selectedDisease !== "all" || fromDate !== "" || toDate !== "";
+  const filterBadgeCount = (statusFilter !== "all" ? 1 : 0)
+    + (sortOption !== "none" ? 1 : 0)
+    + (search.trim().length > 0 ? 1 : 0)
+    + (selectedDisease !== "all" ? 1 : 0)
+    + (fromDate !== "" ? 1 : 0)
+    + (toDate !== "" ? 1 : 0);
 
   function clearAllFilters() {
     setStatusFilter("all");
     setSortOption("none");
+    setSearch("");
+    setSelectedDisease("all");
+    setFromDate("");
+    setToDate("");
     setPage(1);
   }
 
   // ── Pagination ─────────────────────────────────────────────────────────────
-  const totalPages = pagination?.totalPages ?? 1;
+  const totalPages = effectiveTotalPages;
   const getPageNumbers = (): (number | "…")[] => {
     if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
     const pages: (number | "…")[] = [1];
-    if (page > 3) pages.push("…");
-    for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) pages.push(i);
-    if (page < totalPages - 2) pages.push("…");
+    if (effectivePage > 3) pages.push("…");
+    for (let i = Math.max(2, effectivePage - 1); i <= Math.min(totalPages - 1, effectivePage + 1); i++) pages.push(i);
+    if (effectivePage < totalPages - 2) pages.push("…");
     pages.push(totalPages);
     return pages;
   };
 
-  const COL_HEADERS = ["Patient", "Alert Type", "Risk", "Score", "Resolution", "Resolved By", "Resolved At", "Action"];
+  const COL_HEADERS = ["Patient", "Disease", "Alert Type", "Score", "Resolution", "Resolved", "Action"];
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -274,7 +435,7 @@ export default function ResolvedPatientsPage() {
             <input
               className="mw-input"
               style={{ paddingLeft: 44, width: "100%", boxSizing: "border-box" }}
-              placeholder="Search by name or phone…"
+              placeholder="Search by name or patient ID…"
               value={search}
               onChange={e => handleSearch(e.target.value)}
             />
@@ -325,6 +486,105 @@ export default function ResolvedPatientsPage() {
                 animation: "dropIn 0.18s ease",
               }}>
 
+                
+
+                {/* Disease section */}
+                <div style={{ padding: "12px 16px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Disease
+                  </div>
+                  <select
+                    value={selectedDisease}
+                    onChange={e => { setSelectedDisease(e.target.value); setPage(1); }}
+                    style={{
+                      width: "100%", padding: "10px 12px", borderRadius: 12,
+                      border: "1.5px solid #e2e8f0", background: "white",
+                      color: "#374151", fontSize: 13, outline: "none",
+                    }}
+                  >
+                    <option value="all">All diseases</option>
+                    {diseases.map(disease => (
+                      <option key={disease.id} value={disease.id}>{disease.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Date range section */}
+                <div style={{ padding: "12px 16px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Resolved date range
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "#475569" }}>
+                      From
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={e => { setFromDate(e.target.value); setPage(1); }}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: "1.5px solid #e2e8f0", outline: "none", fontSize: 13 }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "#475569" }}>
+                      To
+                      <input
+                        type="date"
+                        value={toDate}
+                        onChange={e => { setToDate(e.target.value); setPage(1); }}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: "1.5px solid #e2e8f0", outline: "none", fontSize: 13 }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Alert section */}
+                <div style={{ padding: "16px 16px 12px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Alert Type
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    {STATUS_FILTERS.map(f => (
+                      <button
+                        key={f.value}
+                        onClick={() => handleStatus(f.value)}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "9px 12px", borderRadius: 10, border: "none",
+                          background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "transparent",
+                          color: statusFilter === f.value ? "#1D9E75" : "#374151",
+                          fontWeight: statusFilter === f.value ? 700 : 500,
+                          fontSize: 13, cursor: "pointer", textAlign: "left",
+                          transition: "background 0.15s", width: "100%",
+                        }}
+                        onMouseEnter={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
+                        }}
+                        onMouseLeave={e => {
+                          if (statusFilter !== f.value)
+                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                        }}
+                      >
+                        <span>{f.label}</span>
+                        {statusFilter === f.value && (
+                          <span style={{
+                            width: 8, height: 8, borderRadius: "50%",
+                            background: "#1D9E75", flexShrink: 0,
+                          }} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Sort section */}
                 <div style={{ padding: "12px 16px 16px" }}>
                   <div style={{
@@ -363,49 +623,6 @@ export default function ResolvedPatientsPage() {
                           <span style={{
                             width: 8, height: 8, borderRadius: "50%",
                             background: "#378ADD", flexShrink: 0,
-                          }} />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Status section */}
-                <div style={{ padding: "16px 16px 12px" }}>
-                  <div style={{
-                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
-                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
-                  }}>
-                    Alert Type
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                    {STATUS_FILTERS.map(f => (
-                      <button
-                        key={f.value}
-                        onClick={() => handleStatus(f.value)}
-                        style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between",
-                          padding: "9px 12px", borderRadius: 10, border: "none",
-                          background: statusFilter === f.value ? "rgba(29,158,117,0.08)" : "transparent",
-                          color: statusFilter === f.value ? "#1D9E75" : "#374151",
-                          fontWeight: statusFilter === f.value ? 700 : 500,
-                          fontSize: 13, cursor: "pointer", textAlign: "left",
-                          transition: "background 0.15s", width: "100%",
-                        }}
-                        onMouseEnter={e => {
-                          if (statusFilter !== f.value)
-                            (e.currentTarget as HTMLButtonElement).style.background = "#f8fafc";
-                        }}
-                        onMouseLeave={e => {
-                          if (statusFilter !== f.value)
-                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
-                        }}
-                      >
-                        <span>{f.label}</span>
-                        {statusFilter === f.value && (
-                          <span style={{
-                            width: 8, height: 8, borderRadius: "50%",
-                            background: "#1D9E75", flexShrink: 0,
                           }} />
                         )}
                       </button>
@@ -462,6 +679,54 @@ export default function ResolvedPatientsPage() {
                 </button>
               </span>
             )}
+            {selectedDisease !== "all" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                Disease: {diseases.find(d => d.id === selectedDisease)?.name ?? selectedDisease}
+                <button
+                  onClick={() => setSelectedDisease("all")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {fromDate !== "" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                From: {fromDate}
+                <button
+                  onClick={() => setFromDate("")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {toDate !== "" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                To: {toDate}
+                <button
+                  onClick={() => setToDate("")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
             {sortOption !== "none" && (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 6,
@@ -473,6 +738,22 @@ export default function ResolvedPatientsPage() {
                 <button
                   onClick={() => setSortOption("none")}
                   style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#378ADD" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {search.trim().length > 0 && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                Search: {search}
+                <button
+                  onClick={() => setSearch("")}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
                 >
                   <X size={11} />
                 </button>
@@ -521,6 +802,13 @@ export default function ResolvedPatientsPage() {
           {/* Patient rows */}
           {!loading && displayedPatients.map(p => {
             const rm = RISK_META[p.risk_category] ?? RISK_META.low;
+            const scoreNum = p.disease_score != null ? Number(p.disease_score) : undefined;
+            const scoreColorObj = getScoreColor(scoreNum);
+            const scoreBadge = (
+              <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: scoreColorObj.background, color: scoreColorObj.color }}>
+                {formatScore(p.disease_score)}
+              </span>
+            );
             const initials = p.patient_name.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase();
             const alertTypeBg = p.alert_type === "red" ? "#fee2e2" : "#fef9c3";
             const alertTypeColor = p.alert_type === "red" ? "#dc2626" : "#a16207";
@@ -539,20 +827,21 @@ export default function ResolvedPatientsPage() {
                   onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                   onMouseLeave={e => (e.currentTarget.style.background = "white")}
                 >
-                  <div>
+                        <div>
                     <div style={{ fontWeight: 600, color: "#0f172a", fontSize: 14 }}>{p.patient_name}</div>
                     <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.patient_readable_id} · {p.patient_phone}</div>
                   </div>
-                  <div><span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: alertTypeBg, color: alertTypeColor, textTransform: "uppercase" }}>{p.alert_type}</span></div>
-                  <div>
-                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: rm.bg, color: rm.color }}>
-                      {rm.label}
-                    </span>
+                  <div style={{ fontSize: 13, color: "#475569", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={p.disease_name ?? p.diagnosis ?? ""}>
+                    {p.disease_name ?? p.diagnosis ?? "—"}
                   </div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#374151" }}>{p.disease_score != null ? p.disease_score.toFixed(2) : "—"}</div>
+                  <div><span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: alertTypeBg, color: alertTypeColor, textTransform: "uppercase" }}>{p.alert_type}</span></div>
+                  
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{scoreBadge}</div>
                   <div style={{ fontSize: 12, color: "#374151", textTransform: "capitalize" }}>{resolutionLabel}</div>
-                  <div style={{ fontSize: 13, color: "#475569" }}>{p.resolved_by_name || "—"}</div>
-                  <div style={{ fontSize: 13, color: "#64748b" }}>{formatDate(p.resolved_at)}</div>
+                  <div style={{ display: "grid", gap: 4 }}>
+                    <div style={{ fontSize: 13, color: "#475569", fontWeight: 600 }}>{p.resolved_by_name || "—"}</div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>{formatDateTime(p.resolved_at_ist ?? p.resolved_at)}</div>
+                  </div>
                   <div onClick={e => e.stopPropagation()}>
                     <Link href={`/IDpatient/${p.patient_id}`}>
                       <button
@@ -581,7 +870,6 @@ export default function ResolvedPatientsPage() {
                 <div
                   className="patient-mobile-card"
                   style={{ display: "none" }}
-                  onClick={() => router.push(`/IDpatient/${p.patient_id}`)}
                 >
                   <div style={{
                     position: "absolute", left: 0, top: 0, bottom: 0,
@@ -607,7 +895,8 @@ export default function ResolvedPatientsPage() {
                       {[
                         { label: "Alert", value: p.alert_type.toUpperCase(), valueColor: p.alert_type === "red" ? "#dc2626" : "#a16207" },
                         { label: "Resolution", value: resolutionLabel },
-                        { label: "Score", value: p.disease_score != null ? String(p.disease_score.toFixed(2)) : "—" },
+                        { label: "Score", value: scoreBadge },
+                        { label: "Disease", value: p.disease_name ?? p.diagnosis ?? "—" },
                       ].map(stat => (
                         <div key={stat.label} style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
                           <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{stat.label}</div>
@@ -616,11 +905,12 @@ export default function ResolvedPatientsPage() {
                       ))}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }} onClick={e => e.stopPropagation()}>
-                      <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                        Resolved: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.resolved_at)}</span>
+                      <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.5 }}>
+                        <div>Resolved by <span style={{ color: "#64748b", fontWeight: 500 }}>{p.resolved_by_name || "—"}</span></div>
+                        <div><span style={{ color: "#64748b", fontWeight: 500 }}>{formatDateTime(p.resolved_at_ist ?? p.resolved_at)}</span></div>
                       </div>
                       <Link href={`/IDpatient/${p.patient_id}`}>
-                        <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                        <button style={{ padding: "8px 18px", borderRadius: 10, border: "1px solid #9d9d9d", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                           View
                         </button>
                       </Link>
@@ -661,10 +951,10 @@ export default function ResolvedPatientsPage() {
               <div style={{ fontSize: 13, color: "#94a3b8", whiteSpace: "nowrap" }}>
                 Showing{" "}
                 <span style={{ fontWeight: 600, color: "#374151" }}>
-                  {(pagination.page - 1) * pagination.limit + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)}
+                  {(effectivePage - 1) * LIMIT + 1}–{Math.min(effectivePage * LIMIT, effectiveTotal)}
                 </span>{" "}
                 of{" "}
-                <span style={{ fontWeight: 600, color: "#374151" }}>{pagination.total}</span>
+                <span style={{ fontWeight: 600, color: "#374151" }}>{effectiveTotal}</span>
               </div>
 
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -724,13 +1014,13 @@ export default function ResolvedPatientsPage() {
             display: grid;
             gap: 16px;
             align-items: center;
-            grid-template-columns: minmax(140px,1.8fr) 1.2fr 0.7fr 0.9fr 0.65fr 0.7fr 0.8fr 80px;
+            grid-template-columns: minmax(140px,1.4fr) 1fr 0.6fr 0.5fr 0.7fr 1.1fr 80px;
           }
           @media (min-width:1024px) and (max-width:1300px) {
-            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.6fr 0.75fr 70px; gap: 12px; }
+            .patients-grid { grid-template-columns: minmax(130px,1.4fr) 1fr 0.6fr 0.5fr 0.7fr 1.1fr 70px; gap: 12px; }
           }
           @media (max-width:1023px) and (min-width:768px) {
-            .patients-grid { grid-template-columns: minmax(130px,1.6fr) 1fr 0.6fr 0.85fr 0.6fr 0.6fr 0.75fr 70px; gap: 10px; }
+            .patients-grid { grid-template-columns: minmax(130px,1.4fr) 1fr 0.6fr 0.5fr 0.7fr 1.1fr 70px; gap: 10px; }
           }
           @media (max-width:767px) {
             .patient-table-header { display: none !important; }

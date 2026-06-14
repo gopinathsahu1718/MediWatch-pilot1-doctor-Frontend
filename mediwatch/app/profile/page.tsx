@@ -108,6 +108,7 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
+  const [editEmail, setEditEmail] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
 
   // Change password state
@@ -142,6 +143,7 @@ export default function ProfilePage() {
         setProfile(prof);
         setEditName(prof.name || "");
         setEditPhone(prof.phone || "");
+        setEditEmail(prof.email || "");
       } catch {
         setFetchError("Network error. Could not load profile.");
       } finally {
@@ -154,24 +156,38 @@ export default function ProfilePage() {
   // ── Save profile ───────────────────────────────────────────────────────────
   async function handleSaveProfile() {
     if (!editName.trim()) { showToast("Name cannot be empty.", "error"); return; }
-    if (editPhone.length < 10) { showToast("Enter a valid phone number.", "error"); return; }
+    if (editEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editEmail.trim())) {
+      showToast("Enter a valid email address.", "error");
+      return;
+    }
     setSavingProfile(true);
     try {
       const token = localStorage.getItem("doctor_token");
+      const payload: Record<string, string> = {};
+      if (editName.trim()) payload.name = editName.trim();
+      if (editEmail.trim()) payload.email = editEmail.trim();
+
       const res = await fetch(`${BASE_URL}/api/v1/doctor/profile`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`,
         },
-        body: JSON.stringify({ name: editName.trim(), phone: editPhone.trim() }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         showToast(data?.message || "Failed to update profile.", "error");
         return;
       }
-      const updated: DoctorProfile = data?.data || data?.doctor || { ...profile!, name: editName, phone: editPhone };
+      const responseProfile = (data?.data || data?.doctor || {}) as Partial<DoctorProfile>;
+      const updated: DoctorProfile = {
+        ...profile!,
+        ...responseProfile,
+        name: editName.trim(),
+        email: editEmail.trim() || profile?.email || "",
+        phone: editPhone,
+      };
       setProfile(updated);
       setEditing(false);
       showToast("Profile updated successfully!", "success");
@@ -261,14 +277,9 @@ export default function ProfilePage() {
 
   const fields = profile
     ? [
-        { label: "Full Name",       value: profile.name,            icon: User        },
-        { label: "Specialization",  value: profile.specialization,  icon: Stethoscope },
-        { label: "Phone",           value: profile.phone,           icon: Smartphone  },
-        { label: "Email",           value: profile.email,           icon: Mail        },
-        { label: "Experience",      value: profile.experience,      icon: Star        },
-        { label: "License No.",     value: profile.license,         icon: FileText    },
-        { label: "Hospital",        value: profile.hospital,        icon: Hospital    },
-        { label: "Department",      value: profile.department_name, icon: Stethoscope },
+        { label: "Email",      value: profile.email,           icon: Mail       },
+        { label: "Hospital",   value: profile.hospital,        icon: Hospital   },
+        { label: "Department", value: profile.department_name, icon: Stethoscope },
       ]
     : [];
 
@@ -379,38 +390,61 @@ export default function ProfilePage() {
                   )}
                 </div>
 
+                <div style={{ background: "#f8fafc", borderRadius: 18, padding: 20, marginBottom: 24, display: "flex", alignItems: "center", gap: 20, border: "1px solid #e2e8f0" }}>
+                  <div style={{ width: 70, height: 70, borderRadius: "50%", background: "linear-gradient(135deg,#378ADD,#1D9E75)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, fontWeight: 800, color: "white", flexShrink: 0 }}>
+                    {initials}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: "#0f172a" }}>{profile.name}</div>
+                    {profile.phone && (
+                      <div style={{ fontSize: 15, fontWeight: 600, color: "#475569", marginTop: 8 }}>{profile.phone}</div>
+                    )}
+                  </div>
+                </div>
+
                 {editing ? (
-                  /* Edit mode: only name & phone are editable per API */
-                  <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-                    <div>
-                      <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>
-                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}><User size={13} /> Full Name</span>
+                  /* Edit mode: only name is editable */
+                  <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                    <div style={{ padding: 24, background: "#f8fafc", borderRadius: 18, border: "1px solid #e2e8f0" }}>
+                      <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 10 }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}><User size={14} /> Full Name</span>
                       </label>
                       <input
-                        type="text" className="mw-input"
-                        value={editName} onChange={e => setEditName(e.target.value)}
+                        type="text"
+                        className="mw-input"
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
                         placeholder="Dr. Full Name"
+                        style={{ width: "100%" }}
                       />
                     </div>
-                    <div>
-                      <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 8 }}>
-                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Smartphone size={13} /> Phone Number</span>
-                      </label>
-                      <input
-                        type="tel" className="mw-input"
-                        value={editPhone} onChange={e => setEditPhone(e.target.value)}
-                        placeholder="9XXXXXXXXX"
-                      />
+
+                    <div style={{ display: "grid", gap: 16 }}>
+                      <div style={{ padding: "18px 20px", background: "#ffffff", borderRadius: 18, border: "1px solid #e2e8f0" }}>
+                        <div style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600, marginBottom: 10 }}>Email Address</div>
+                        <input
+                          type="email"
+                          className="mw-input"
+                          value={editEmail}
+                          onChange={e => setEditEmail(e.target.value)}
+                          placeholder="name@example.com"
+                          style={{ width: "100%" }}
+                        />
+                      </div>
+                      <div style={{ padding: "18px 20px", background: "#f8fafc", borderRadius: 18, border: "1px solid #e2e8f0" }}>
+                        <div style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600, marginBottom: 10 }}>Phone Number</div>
+                        <input
+                          type="tel"
+                          className="mw-input"
+                          value={editPhone}
+                          readOnly
+                          style={{ width: "100%", background: "#f8fafc", cursor: "not-allowed" }}
+                        />
+                      </div>
                     </div>
-                    {/* Read-only fields shown as disabled */}
-                    <div style={{ padding: "14px 16px", background: "#f8fafc", borderRadius: 12, border: "1px solid #e2e8f0" }}>
-                      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
-                        Only <strong>name</strong> and <strong>phone</strong> can be updated. Other details are managed by your administrator.
-                      </p>
-                    </div>
-                    {/* Show remaining fields as read-only */}
+
                     <div className="responsive-grid-2" style={{ gap: 14 }}>
-                      {fields.filter(f => !["Full Name", "Phone"].includes(f.label)).map(item => (
+                      {fields.filter(f => f.label !== "Full Name").map(item => (
                         <FieldCard key={item.label} {...item} />
                       ))}
                     </div>

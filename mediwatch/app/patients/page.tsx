@@ -26,6 +26,9 @@ interface ApiPatient {
   monitoring_end: string | null;
   disease_name: string;
   day_number: number | null;
+  last_trend?: string | null;
+  last_score?: number | null;
+  last_submitted?: string | null;
 }
 
 interface PatientsStats {
@@ -42,6 +45,11 @@ interface Pagination {
   page: number;
   limit: number;
   totalPages: number;
+}
+
+interface DiseaseOption {
+  id: string;
+  name: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -68,6 +76,12 @@ const RISK_META: Record<string, { label: string; color: string; bg: string; weig
   high:   { label: "High",   color: "#dc2626", bg: "#fee2e2", weight: 3 },
   medium: { label: "Medium", color: "#a16207", bg: "#fef9c3", weight: 2 },
   low:    { label: "Low",    color: "#15803d", bg: "#dcfce7", weight: 1 },
+};
+
+const TREND_META: Record<string, { label: string; color: string; bg: string }> = {
+  red:    { label: "Red",    color: "#dc2626", bg: "#fee2e2" },
+  yellow: { label: "Yellow", color: "#a16207", bg: "#fef9c3" },
+  green:  { label: "Green",  color: "#15803d", bg: "#dcfce7" },
 };
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
@@ -112,6 +126,10 @@ export default function PatientsPage() {
   const [stats,      setStats]      = useState<PatientsStats | null>(null);
   const [patients,   setPatients]   = useState<ApiPatient[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [diseases,   setDiseases]   = useState<DiseaseOption[]>([]);
+  const [selectedDisease, setSelectedDisease] = useState<string>("all");
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
 
@@ -180,37 +198,99 @@ export default function PatientsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, statusFilter, page]);
 
+  useEffect(() => {
+    async function loadDiseases() {
+      const token = getToken();
+      if (!token) return;
+      try {
+        const res = await fetch("https://api.mediwatch.in/api/v1/doctor/diseases", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const raw = await res.json();
+        const list = Array.isArray(raw?.data?.diseases) ? raw.data.diseases : [];
+        setDiseases(list.map((item: any) => ({ id: String(item.id ?? item.disease_id ?? item.name), name: String(item.name ?? "") })));
+      } catch {
+        // ignore disease fetch failures; filter remains available with empty list
+      }
+    }
+
+    loadDiseases();
+  }, []);
+
   const handleSearch = (v: string) => { setSearch(v);       setPage(1); };
   const handleStatus = (v: string) => { setStatusFilter(v); setPage(1); };
 
-  // Derived sorted list
-  const displayedPatients = sortPatients(patients, sortOption);
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredPatients = patients.filter((p) => {
+    if (selectedDisease !== "all") {
+      const diseaseName = (p.disease_name || "").toLowerCase();
+      const selectedName = diseases.find(d => d.id === selectedDisease)?.name?.toLowerCase() ?? "";
+      const matchesDisease = p.disease_name === selectedDisease || diseaseName.includes(selectedName) || selectedName.includes(diseaseName);
+      if (!matchesDisease) return false;
+    }
 
-  // ── Computed filter label ──────────────────────────────────────────────────
-  const hasFilters = statusFilter !== "all" || sortOption !== "none";
-  const filterBadgeCount = (statusFilter !== "all" ? 1 : 0) + (sortOption !== "none" ? 1 : 0);
+    if (fromDate || toDate) {
+      const createdAt = p.created_at;
+      if (!createdAt) return false;
+      const createdTime = new Date(createdAt).getTime();
+      if (Number.isNaN(createdTime)) return false;
+      if (fromDate) {
+        const fromTime = new Date(`${fromDate}T00:00:00`).getTime();
+        if (createdTime < fromTime) return false;
+      }
+      if (toDate) {
+        const toTime = new Date(`${toDate}T23:59:59`).getTime();
+        if (createdTime > toTime) return false;
+      }
+    }
+
+    if (!normalizedSearch) return true;
+    return (
+      p.name.toLowerCase().includes(normalizedSearch) ||
+      p.phone.toLowerCase().includes(normalizedSearch)
+    );
+  });
+
+  const hasFilters = statusFilter !== "all" || sortOption !== "none" || selectedDisease !== "all" || fromDate !== "" || toDate !== "";
+  const filterBadgeCount = (statusFilter !== "all" ? 1 : 0)
+    + (sortOption !== "none" ? 1 : 0)
+    + (selectedDisease !== "all" ? 1 : 0)
+    + (fromDate !== "" ? 1 : 0)
+    + (toDate !== "" ? 1 : 0);
+
+  const filteredSortedPatients = sortPatients(filteredPatients, sortOption);
+  const isLocalFilterActive = selectedDisease !== "all" || fromDate !== "" || toDate !== "";
+  const effectiveTotal = isLocalFilterActive ? filteredSortedPatients.length : pagination?.total ?? 0;
+  const effectiveTotalPages = isLocalFilterActive ? Math.max(1, Math.ceil(filteredSortedPatients.length / LIMIT)) : pagination?.totalPages ?? 1;
+  const effectivePage = Math.min(page, effectiveTotalPages);
+  const displayedPatients = filteredSortedPatients.slice((effectivePage - 1) * LIMIT, effectivePage * LIMIT);
 
   function clearAllFilters() {
     setStatusFilter("all");
     setSortOption("none");
+    setSelectedDisease("all");
+    setFromDate("");
+    setToDate("");
     setPage(1);
   }
 
   // ── Pagination ─────────────────────────────────────────────────────────────
-  const totalPages = pagination?.totalPages ?? 1;
+  const totalPages = effectiveTotalPages;
+  const currentPage = effectivePage;
   const getPageNumbers = (): (number | "…")[] => {
     if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
     const pages: (number | "…")[] = [1];
-    if (page > 3) pages.push("…");
-    for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) pages.push(i);
-    if (page < totalPages - 2) pages.push("…");
+    if (currentPage > 3) pages.push("…");
+    for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) pages.push(i);
+    if (currentPage < totalPages - 2) pages.push("…");
     pages.push(totalPages);
     return pages;
   };
 
   const n = (v: string | number | undefined) => Number(v ?? 0);
 
-  const COL_HEADERS = ["Patient", "Disease", "Risk", "Status", "Monitoring", "Registered", "Action"];
+  const COL_HEADERS = ["Patient", "Disease", "Trend", "Status", "Monitoring", "Registered", "Action"];
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -407,6 +487,63 @@ export default function PatientsPage() {
                 {/* Divider */}
                 <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
 
+                {/* Disease section */}
+                <div style={{ padding: "12px 16px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Disease
+                  </div>
+                  <select
+                    value={selectedDisease}
+                    onChange={e => { setSelectedDisease(e.target.value); setPage(1); }}
+                    style={{
+                      width: "100%", padding: "10px 12px", borderRadius: 12,
+                      border: "1.5px solid #e2e8f0", background: "white",
+                      color: "#374151", fontSize: 13, outline: "none",
+                    }}
+                  >
+                    <option value="all">All diseases</option>
+                    {diseases.map(disease => (
+                      <option key={disease.id} value={disease.id}>{disease.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Date range section */}
+                <div style={{ padding: "12px 16px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, color: "#94a3b8",
+                    textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10,
+                  }}>
+                    Registered date range
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "#475569" }}>
+                      From
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={e => { setFromDate(e.target.value); setPage(1); }}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: "1.5px solid #e2e8f0", outline: "none", fontSize: 13 }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "#475569" }}>
+                      To
+                      <input
+                        type="date"
+                        value={toDate}
+                        onChange={e => { setToDate(e.target.value); setPage(1); }}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: "1.5px solid #e2e8f0", outline: "none", fontSize: 13 }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div style={{ height: 1, background: "#f1f5f9", margin: "0 16px" }} />
+
                 {/* Sort section */}
                 <div style={{ padding: "12px 16px 16px" }}>
                   <div style={{
@@ -496,6 +633,54 @@ export default function PatientsPage() {
                 </button>
               </span>
             )}
+            {selectedDisease !== "all" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                Disease: {diseases.find(d => d.id === selectedDisease)?.name ?? selectedDisease}
+                <button
+                  onClick={() => { setSelectedDisease("all"); setPage(1); }}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {fromDate !== "" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                From: {fromDate}
+                <button
+                  onClick={() => { setFromDate(""); setPage(1); }}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            {toDate !== "" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", borderRadius: 99,
+                background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.25)",
+                color: "#475569", fontSize: 12, fontWeight: 600,
+              }}>
+                To: {toDate}
+                <button
+                  onClick={() => { setToDate(""); setPage(1); }}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", color: "#475569" }}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
             {sortOption !== "none" && (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 6,
@@ -555,7 +740,7 @@ export default function PatientsPage() {
           {/* Patient rows */}
           {!loading && displayedPatients.map(p => {
             const sm = STATUS_META[p.status] ?? STATUS_META.inactive;
-            const rm = RISK_META[p.risk_category] ?? RISK_META.low;
+            const tm = p.last_trend ? (TREND_META[p.last_trend] ?? { label: p.last_trend, color: "#475569", bg: "#f8fafc" }) : { label: "Not submitted", color: "#64748b", bg: "#f8fafc" };
             const initials = p.name.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase();
 
             return (
@@ -577,8 +762,8 @@ export default function PatientsPage() {
                   </div>
                   <div style={{ fontSize: 13, color: "#475569" }}>{p.disease_name || "—"}</div>
                   <div>
-                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: rm.bg, color: rm.color }}>
-                      {rm.label}
+                    <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: tm.bg, color: tm.color }}>
+                      {tm.label}
                     </span>
                   </div>
                   <div>
@@ -621,18 +806,17 @@ export default function PatientsPage() {
                 <div
                   className="patient-mobile-card"
                   style={{ display: "none" }}
-                  onClick={() => router.push(`#`)}
                 >
                   <div style={{
                     position: "absolute", left: 0, top: 0, bottom: 0,
-                    width: 4, borderRadius: "0 4px 4px 0", background: rm.color,
+                    width: 4, borderRadius: "0 4px 4px 0", background: tm.color,
                   }} />
                   <div style={{ paddingLeft: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
                       <div style={{
                         width: 44, height: 44, borderRadius: 14, flexShrink: 0,
-                        background: rm.bg, display: "flex", alignItems: "center", justifyContent: "center",
-                        fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 15, color: rm.color,
+                        background: tm.bg, display: "flex", alignItems: "center", justifyContent: "center",
+                        fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 15, color: tm.color,
                       }}>
                         {initials}
                       </div>
@@ -640,7 +824,7 @@ export default function PatientsPage() {
                         <div style={{ fontWeight: 700, color: "#0f172a", fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
                         <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.phone}</div>
                       </div>
-                      <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, background: rm.bg, color: rm.color, flexShrink: 0 }}>{rm.label}</span>
+                      <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, background: tm.bg, color: tm.color, flexShrink: 0 }}>{tm.label}</span>
                     </div>
                     <div style={{ height: 1, background: "#f1f5f9", marginBottom: 12 }} />
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
@@ -660,7 +844,7 @@ export default function PatientsPage() {
                         Registered: <span style={{ color: "#64748b", fontWeight: 500 }}>{formatDate(p.created_at)}</span>
                       </div>
                       <Link href={`/IDpatient/${p.id}`}>
-                        <button style={{ padding: "8px 18px", borderRadius: 10, border: "none", background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>View</button>
+                        <button style={{ padding: "8px 18px", borderRadius: 10, background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer",border: "1px solid #9d9d9d" }}>View</button>
                       </Link>
                     </div>
                   </div>
@@ -688,7 +872,7 @@ export default function PatientsPage() {
           )}
 
           {/* Pagination */}
-          {!loading && displayedPatients.length > 0 && pagination && (
+          {!loading && displayedPatients.length > 0 && (
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
               padding: "16px 24px", borderTop: "1px solid #f1f5f9",
@@ -697,21 +881,21 @@ export default function PatientsPage() {
               <div style={{ fontSize: 13, color: "#94a3b8", whiteSpace: "nowrap" }}>
                 Showing{" "}
                 <span style={{ fontWeight: 600, color: "#374151" }}>
-                  {(pagination.page - 1) * pagination.limit + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)}
+                  {(currentPage - 1) * LIMIT + 1}–{Math.min(currentPage * LIMIT, effectiveTotal)}
                 </span>{" "}
                 of{" "}
-                <span style={{ fontWeight: 600, color: "#374151" }}>{pagination.total}</span>{" "}
+                <span style={{ fontWeight: 600, color: "#374151" }}>{effectiveTotal}</span>{" "}
                 patients
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
                   onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={page === 1}
+                  disabled={currentPage === 1}
                   style={{
                     width: 36, height: 36, borderRadius: 10, border: "1.5px solid #e2e8f0",
-                    background: page === 1 ? "#f8fafc" : "white",
-                    color: page === 1 ? "#cbd5e1" : "#374151",
-                    fontWeight: 700, fontSize: 16, cursor: page === 1 ? "default" : "pointer",
+                    background: currentPage === 1 ? "#f8fafc" : "white",
+                    color: currentPage === 1 ? "#cbd5e1" : "#374151",
+                    fontWeight: 700, fontSize: 16, cursor: currentPage === 1 ? "default" : "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}
                 >‹</button>
@@ -725,10 +909,10 @@ export default function PatientsPage() {
                       onClick={() => setPage(pg as number)}
                       style={{
                         width: 36, height: 36, borderRadius: 10, border: "1.5px solid",
-                        borderColor: page === pg ? "#1D9E75" : "#e2e8f0",
-                        background: page === pg ? "rgba(29,158,117,0.08)" : "white",
-                        color: page === pg ? "#1D9E75" : "#374151",
-                        fontWeight: page === pg ? 700 : 500, fontSize: 13,
+                        borderColor: currentPage === pg ? "#1D9E75" : "#e2e8f0",
+                        background: currentPage === pg ? "rgba(29,158,117,0.08)" : "white",
+                        color: currentPage === pg ? "#1D9E75" : "#374151",
+                        fontWeight: currentPage === pg ? 700 : 500, fontSize: 13,
                         cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                       }}
                     >{pg}</button>
@@ -737,12 +921,12 @@ export default function PatientsPage() {
 
                 <button
                   onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
+                  disabled={currentPage === totalPages}
                   style={{
                     width: 36, height: 36, borderRadius: 10, border: "1.5px solid #e2e8f0",
-                    background: page === totalPages ? "#f8fafc" : "white",
-                    color: page === totalPages ? "#cbd5e1" : "#374151",
-                    fontWeight: 700, fontSize: 16, cursor: page === totalPages ? "default" : "pointer",
+                    background: currentPage === totalPages ? "#f8fafc" : "white",
+                    color: currentPage === totalPages ? "#cbd5e1" : "#374151",
+                    fontWeight: 700, fontSize: 16, cursor: currentPage === totalPages ? "default" : "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}
                 >›</button>

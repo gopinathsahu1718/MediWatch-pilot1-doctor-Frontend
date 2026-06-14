@@ -491,7 +491,7 @@ export default function RegisterPage() {
                   checked={consent} onChange={e => setConsent(e.target.checked)}
                 />
                 <span className="reg-label" style={{ fontSize: 14, color: "#374151" }}>
-                  Patient consent form signed and understood <span style={{ color: "#ef4444" }}>*</span>
+                  Patient has been fully informed and acknowledges the monitoring plan.<span style={{ color: "#ef4444" }}>*</span>
                 </span>
               </label>
 

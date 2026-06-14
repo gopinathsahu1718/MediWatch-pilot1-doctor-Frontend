@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import {
   Search, Users, ShieldCheck, Activity, AlertTriangle,
-  SlidersHorizontal, X, CheckCircle, Clock, ClipboardCheck, Bell,
+  SlidersHorizontal, X, CheckCircle, Clock, ClipboardCheck, Bell, Phone, MessageCircle, Copy, RefreshCw
 } from "lucide-react";
 import Link from "next/link";
 
@@ -15,6 +15,7 @@ interface DashboardStats {
   green: number;
   yellow: number;
   red: number;
+  unsubmitted_today: number;
 }
 
 interface ApiPatient {
@@ -37,6 +38,8 @@ interface ApiPatient {
   relative_contact?: string;
   relative_phone?: string;
   last_submitted?: string;
+  disease_score?: string | number;
+  priority_value?: number;
 }
 
 interface RedAlert {
@@ -44,12 +47,16 @@ interface RedAlert {
   patientId: string;
   patientReadableId: string;
   patientName: string;
-  submissionId: string;
+  submissionId?: string;
   alertType: string;
   diseaseScore: number;
-  lastSubmissionTime: string;
-  alertCreatedAt: string;
+  lastSubmissionTime?: string;
+  alertCreatedAt?: string;
+  inProcessByName?: string;
+  inProcessAtIst?: string;
   reason: string;
+  riskCategory?: string;
+  submissionTrend?: string;
 }
 
 interface DashboardResponse {
@@ -78,6 +85,8 @@ interface Patient {
   // enriched from redAlerts
   diseaseScore?: number;
   alertReason?: string;
+  inProcessByName?: string;
+  inProcessAtIst?: string;
   // local UI lifecycle state
   lifecycleStatus: "pending" | "in_process" | "resolved";
   isAcknowledging: boolean;
@@ -119,6 +128,56 @@ const formatDateTime = (dateString: string): string => {
   }
 };
 
+const formatScore = (value: number | string | undefined | null): string => {
+  if (value == null) return "—";
+  const n = typeof value === "number" ? value : Number(value);
+  if (Number.isNaN(n)) return "—";
+  return n.toFixed(1);
+};
+
+const parseSubmissionDate = (value?: string | null): Date | null => {
+  if (!value) return null;
+  const normalized = value.trim().replace(" ", "T");
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const isSameLocalDay = (a: Date, b: Date): boolean =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+
+const hasSubmittedToday = (lastSubmitted?: string | null): boolean => {
+  const submittedDate = parseSubmissionDate(lastSubmitted);
+  if (!submittedDate) return false;
+  return isSameLocalDay(submittedDate, new Date());
+};
+
+const hasNotSubmittedToday = (patient: ApiPatient): boolean => !hasSubmittedToday(patient.last_submitted);
+
+// Transform snake_case API response to camelCase RedAlert format
+const transformRedAlert = (raw: any): RedAlert => {
+  // Generate reason from alert type and trend
+  const reason = raw.submission_trend ? `${raw.submission_trend.charAt(0).toUpperCase() + raw.submission_trend.slice(1)} Alert` : "Alert";
+  
+  return {
+    alertId: raw.id,
+    patientId: raw.patient_id,
+    patientReadableId: raw.patient_readable_id,
+    patientName: raw.patient_name,
+    submissionId: raw.submission_id,
+    alertType: raw.alert_type,
+    diseaseScore: Number(raw.disease_score ?? 0),
+    lastSubmissionTime: raw.last_submission_time,
+    alertCreatedAt: raw.created_at_ist,
+    inProcessByName: raw.in_process_by_name,
+    inProcessAtIst: raw.in_process_at_ist,
+    reason: reason,
+    riskCategory: raw.risk_category,
+    submissionTrend: raw.submission_trend,
+  };
+};
+
 const normalisePatient = (p: ApiPatient, alertMap: Record<string, RedAlert>): Patient => {
   const alert = p.alert_id ? alertMap[p.alert_id] : Object.values(alertMap).find(a => a.patientId === p.id);
   // Map real API alert_status values to lifecycleStatus
@@ -144,8 +203,11 @@ const normalisePatient = (p: ApiPatient, alertMap: Record<string, RedAlert>): Pa
     hasUnackAlert: p.has_unack_alert,
     alertId: p.alert_id ?? alert?.alertId ?? null,
     lastSubmitted: p.last_submitted ?? new Date().toISOString(),
-    diseaseScore: alert?.diseaseScore,
+    // Use diseaseScore from alert, fallback to apiPatient.disease_score, then undefined
+    diseaseScore: alert?.diseaseScore ?? (p.disease_score ? Number(p.disease_score) : undefined),
     alertReason: alert?.reason,
+    inProcessByName: alert?.inProcessByName,
+    inProcessAtIst: alert?.inProcessAtIst,
     lifecycleStatus,
     isAcknowledging: false,
     isResolving: false,
@@ -202,10 +264,13 @@ export default function DashboardPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 10;
 
-  const [stats, setStats] = useState<DashboardStats>({ total_active: 0, green: 0, yellow: 0, red: 0 });
+  const [stats, setStats] = useState<DashboardStats>({ total_active: 0, green: 0, yellow: 0, red: 0, unsubmitted_today: 0 });
+  const [activePatients, setActivePatients] = useState<ApiPatient[]>([]);
   const [redPatients, setRedPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showUnsubmittedModal, setShowUnsubmittedModal] = useState(false);
   const [resolveModal, setResolveModal] = useState<ResolveModalState | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "in_process">("all");
@@ -259,17 +324,20 @@ export default function DashboardPage() {
         green: Number(statsRaw.green ?? 0),
         yellow: Number(statsRaw.yellow ?? 0),
         red: Number(statsRaw.red ?? 0),
+        unsubmitted_today: Number(statsRaw.unsubmitted_today ?? 0),
       });
 
       // Build alertMap from redAlerts for enrichment
       const alertMap: Record<string, RedAlert> = {};
-      (Array.isArray(data?.redAlerts) ? data.redAlerts : []).forEach((a: RedAlert) => {
-        alertMap[a.alertId] = a;
+      (Array.isArray(data?.redAlerts) ? data.redAlerts : []).forEach((a: any) => {
+        const transformed = transformRedAlert(a);
+        alertMap[transformed.alertId] = transformed;
       });
 
       // Only show patients with a real pending/in_process alert (alert_id must exist)
       // After resolving, the dashboard API returns alert_id=null for that patient -> they drop off
       const list: ApiPatient[] = Array.isArray(data?.activePatients) ? data.activePatients : [];
+      setActivePatients(list);
       const red = list
         .filter(p =>
           p.alert_id !== null &&
@@ -309,6 +377,16 @@ export default function DashboardPage() {
     return () => clearTimeout(timer);
   }, [search, fetchDashboard]);
 
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await fetchDashboard(search);
+      setCurrentPage(1);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   // ── Acknowledge: ack → in_progress ───────────────────────────────────────
 
   // ── Acknowledge: pending → in_process ────────────────────────────────────
@@ -344,6 +422,9 @@ export default function DashboardPage() {
             : p
         )
       );
+      
+      // Re-fetch dashboard to ensure fresh data after status change
+      fetchDashboard(search);
 
     } catch {
       setRedPatients(prev =>
@@ -385,6 +466,9 @@ export default function DashboardPage() {
             : p
         )
       );
+      
+      // Re-fetch dashboard to ensure fresh data after status change
+      fetchDashboard(search);
 
     } catch {
       setRedPatients(prev =>
@@ -496,6 +580,7 @@ export default function DashboardPage() {
   const pendingCount = redPatients.filter(p => p.lifecycleStatus === "pending").length;
   const inProgCount = redPatients.filter(p => p.lifecycleStatus === "in_process").length;
   const resolvedCount = redPatients.filter(p => p.lifecycleStatus === "resolved").length;
+  const unsubmittedPatients = activePatients.filter(hasNotSubmittedToday);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -504,13 +589,52 @@ export default function DashboardPage() {
       <main className="main-content">
 
         {/* Page Header */}
-        <div style={{ background: "#378ADD", padding: "20px 24px", borderRadius: 16, marginBottom: 28 }}>
-          <h1 className="heading-font" style={{ fontSize: 28, fontWeight: 800, color: "white", margin: 0 }}>
-            Dashboard
-          </h1>
-          <p style={{ color: "rgba(255,255,255,0.8)", fontSize: 14, marginTop: 4 }}>
-            Overview of active patients and alerts
-          </p>
+        <div style={{ background: "#378ADD", padding: "20px 24px", borderRadius: 16, marginBottom: 28, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 className="heading-font" style={{ fontSize: 28, fontWeight: 800, color: "white", margin: 0 }}>
+              Dashboard
+            </h1>
+            <p style={{ color: "rgba(255,255,255,0.8)", fontSize: 14, marginTop: 4, marginBottom: 0 }}>
+              Overview of active patients and alerts
+            </p>
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "12px 16px",
+              borderRadius: 12,
+              border: "1.5px solid rgba(255,255,255,0.3)",
+              background: "rgba(255,255,255,0.15)",
+              color: "white",
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: isRefreshing ? "not-allowed" : "pointer",
+              transition: "all 0.2s",
+              opacity: isRefreshing ? 0.7 : 1,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+            onMouseEnter={(e) => {
+              if (!isRefreshing) {
+                e.currentTarget.style.background = "rgba(255,255,255,0.25)";
+                e.currentTarget.style.borderColor = "rgba(255,255,255,0.5)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isRefreshing) {
+                e.currentTarget.style.background = "rgba(255,255,255,0.15)";
+                e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)";
+              }
+            }}
+            title="Refresh dashboard"
+          >
+            <RefreshCw size={16} style={{ transition: "transform 0.6s linear", transform: isRefreshing ? "rotate(360deg)" : "rotate(0deg)" }} />
+            <span style={{ display: "inline" }}>Refresh</span>
+          </button>
         </div>
 
         <style>{`
@@ -588,9 +712,201 @@ export default function DashboardPage() {
           .resolve-modal-card {
             animation: resolve-slide-in 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
           }
+          .unsubmitted-modal-card {
+            animation: resolve-slide-in 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+          }
+          .unsubmitted-modal-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            // gap: 16px;
+            flex-wrap: wrap;
+          }
+          .unsubmitted-modal-title h3 {
+            font-size: 20px;
+            margin: 0;
+          }
+          .unsubmitted-modal-title p {
+            margin: 6px 0 0;
+            color: #64748b;
+            font-size: 13px;
+          }
+          .unsubmitted-modal-close {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: #94a3b8;
+            padding: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .unsubmitted-modal-body {
+            border-top: 1px solid #f1f5f9;
+            padding: 0 24px 24px;
+          }
+          .unsubmitted-modal-empty {
+            padding: 40px 0;
+            text-align: center;
+            color: #0f172a;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+          }
+          .unsubmitted-empty-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 24px;
+            background: #dcfce7;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .unsubmitted-empty-title {
+            font-size: 16px;
+            font-weight: 700;
+          }
+          .unsubmitted-empty-copy {
+            max-width: 520px;
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.6;
+          }
+          .unsubmitted-patient-card {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+          }
+          .unsubmitted-patient-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1 1 200px;
+            min-width: 0;
+          }
+          .unsubmitted-patient-name {
+            font-size: 13px;
+            font-weight: 700;
+            color: #0f172a;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .unsubmitted-patient-id {
+            font-size: 11px;
+            color: #94a3b8;
+            margin-top: 1px;
+          }
+          .unsubmitted-patient-trend {
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: #e2e8f0;
+            color: #0f172a;
+            font-size: 10px;
+            font-weight: 700;
+            flex-shrink: 0;
+          }
+          .unsubmitted-contact-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1 1 180px;
+          }
+          .unsubmitted-contact-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            flex-shrink: 0;
+          }
+          .unsubmitted-contact-number {
+            font-size: 12px;
+            font-weight: 600;
+            color: #0f172a;
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          .unsubmitted-contact-btn {
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: opacity 0.15s;
+          }
+          .unsubmitted-contact-btn:hover { opacity: 0.8; }
+          .unsubmitted-divider {
+            width: 1px;
+            height: 32px;
+            background: #e2e8f0;
+            flex-shrink: 0;
+          }
+          @media (max-width: 707px) {
+            .unsubmitted-modal-card {
+              width: calc(100% - 24px);
+              max-width: 100%;
+              border-radius: 20px;
+            }
+            .unsubmitted-modal-header {
+              align-items: stretch;
+            }
+            .unsubmitted-modal-title h3 {
+              font-size: 18px;
+            }
+            .unsubmitted-modal-title p {
+              font-size: 12px;
+            }
+            .unsubmitted-modal-close {
+              margin-left: auto;
+            }
+            .unsubmitted-modal-body {
+              padding: 0 12px 16px;
+            }
+            .unsubmitted-modal-empty {
+              padding: 28px 0;
+              gap: 10px;
+            }
+            .unsubmitted-empty-icon {
+              width: 56px;
+              height: 56px;
+            }
+            .unsubmitted-empty-title {
+              font-size: 15px;
+            }
+            .unsubmitted-empty-copy {
+              font-size: 12px;
+            }
+            .unsubmitted-patient-card {
+              // //flex-direction: column;
+              align-items: stretch;
+              gap: 8px;
+            }
+            .unsubmitted-divider {
+              width: 100%;
+              height: 1px;
+              margin: 0;
+            }
+            .unsubmitted-contact-row {
+              flex: 1 1 auto;
+            }
+          }
           @media (max-width: 768px) {
             .patient-desktop-row, .patient-table-header { display: none !important; }
-            .patient-mobile-card { display: block !important; position: relative; padding: 16px; border-bottom: 1px solid #f1f5f9; }
+            .patient-mobile-card { display: block !important; position: relative; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
           }
           @media (min-width: 769px) {
             .patient-mobile-card { display: none !important; }
@@ -598,15 +914,16 @@ export default function DashboardPage() {
         `}</style>
 
         {/* Stat Cards */}
-        <div className="responsive-grid-4" style={{ marginBottom: 32 }}>
+        <div className="responsive-grid-5" style={{ marginBottom: 32 }}>
           {[
-            { label: "Total Active", value: stats.total_active, color: "#378ADD", bg: "#eff6ff", icon: Users },
-            { label: "Low Risk", value: stats.green, color: "#15803d", bg: "#f0fdf4", icon: ShieldCheck },
-            { label: "Medium Risk", value: stats.yellow, color: "#a16207", bg: "#fefce8", icon: Activity },
-            { label: "High Risk", value: stats.red, color: "#dc2626", bg: "#fef2f2", icon: AlertTriangle },
+            { key: "total_active", label: "Total Active", value: stats.total_active, color: "#378ADD", bg: "#eff6ff", icon: Users },
+            { key: "green", label: "Green Alerts", value: stats.green, color: "#15803d", bg: "#f0fdf4", icon: ShieldCheck },
+            { key: "yellow", label: "Yellow Alerts", value: stats.yellow, color: "#a16207", bg: "#fefce8", icon: Activity },
+            { key: "red", label: "Red Alerts", value: stats.red, color: "#dc2626", bg: "#fef2f2", icon: AlertTriangle },
+            { key: "unsubmitted_today", label: "Unsubmitted Today", value: stats.unsubmitted_today, color: "#0f172a", bg: "#e2e8f0", icon: ClipboardCheck },
           ].map(card => (
             <div
-              key={card.label}
+              key={card.key}
               className="stat-card"
               style={{ background: loading ? "#f8fafc" : card.bg, border: `1px solid ${loading ? "#e2e8f0" : card.color + "22"}` }}
             >
@@ -620,11 +937,28 @@ export default function DashboardPage() {
                 </>
               ) : (
                 <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 10 }}>
-                    <card.icon size={28} color={card.color} />
-                    <div className="heading-font" style={{ fontSize: 36, fontWeight: 800, color: card.color }}>
-                      {card.value}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, marginBottom: 10, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+                      <card.icon size={28} color={card.color} />
+                      <div className="heading-font" style={{ fontSize: 36, fontWeight: 800, color: card.color }}>
+                        {card.value}
+                      </div>
                     </div>
+                    {card.key === "unsubmitted_today" && !loading && (
+                      <button
+                        onClick={() => setShowUnsubmittedModal(true)}
+                        style={{
+                          padding: "8px 14px", borderRadius: 12, border: "1.5px solid #0f172a",
+                          background: "white",
+                          color: "#0f172a",
+                          fontSize: 12, fontWeight: 700,
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        View
+                      </button>
+                    )}
                   </div>
                   <div style={{ color: "#64748b", fontSize: 13, fontWeight: 500, marginTop: 4 }}>
                     {card.label}
@@ -854,7 +1188,15 @@ export default function DashboardPage() {
             const scoreColor = scoreColorObj.color;
 
             return (
-              <div key={p.id}>
+              <div
+                key={p.id}
+                style={{
+                  border: "1px solid #d7dbdf",
+                  borderRadius: 20,
+                  overflow: "hidden",
+                  margin: 4,
+                }}
+              >
                 {/* ── Desktop row ── */}
                 <div
                   className={`patient-desktop-row ${rowClass}`}
@@ -894,7 +1236,7 @@ export default function DashboardPage() {
                         fontWeight: 800, fontSize: 16,
                         fontFamily: "'Syne', sans-serif",
                       }}>
-                        {p.diseaseScore}
+                        {formatScore(p.diseaseScore)}
                       </div>
                     ) : (
                       <span style={{ color: "#cbd5e1", fontSize: 13 }}>—</span>
@@ -1070,78 +1412,57 @@ export default function DashboardPage() {
                     background: isResolved ? "#94a3b8" : isInProgress ? "#a16207" : "#dc2626",
                   }} />
                   <div style={{ paddingLeft: 12 }}>
-                    {/* Header */}
-                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
+                    {/* Header row */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                       <div style={{
-                        width: 44, height: 44, borderRadius: 12, flexShrink: 0,
+                        width: 32, height: 32, borderRadius: 8, flexShrink: 0,
                         background: scoreBg,
                         display: "flex", alignItems: "center", justifyContent: "center",
                         fontFamily: "'Syne', sans-serif", fontWeight: 800,
-                        fontSize: 16, color: scoreColor,
+                        fontSize: 12, color: scoreColor,
                       }}>
-                        {p.diseaseScore ?? "—"}
+                        {formatScore(p.diseaseScore)}
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 700, color: isResolved ? "#94a3b8" : "#0f172a", fontSize: 15 }}>
+                        <div style={{ fontWeight: 700, color: isResolved ? "#94a3b8" : "#0f172a", fontSize: 13, lineHeight: 1.2 }}>
                           {p.name}
                         </div>
-                        <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{p.readableId}</div>
+                        <div style={{ color: "#94a3b8", fontSize: 11, marginTop: 1 }}>{p.readableId} · {p.diagnosis.split(" ").slice(0, 3).join(" ")}</div>
                       </div>
                       {isResolved ? (
-                        <span style={{ padding: "3px 8px", borderRadius: 99, background: "#f1f5f9", color: "#64748b", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Resolved</span>
+                        <span style={{ padding: "2px 7px", borderRadius: 99, background: "#f1f5f9", color: "#64748b", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>Resolved</span>
                       ) : isInProgress ? (
-                        <span style={{ padding: "3px 8px", borderRadius: 99, background: "#fef9e7", color: "#a16207", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>In Review</span>
+                        <span style={{ padding: "2px 7px", borderRadius: 99, background: "#fef9e7", color: "#a16207", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>In Review</span>
                       ) : (
-                        <span style={{ padding: "3px 8px", borderRadius: 99, background: "#fee2e2", color: "#dc2626", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Pending</span>
+                        <span style={{ padding: "2px 7px", borderRadius: 99, background: "#fee2e2", color: "#dc2626", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>Pending</span>
                       )}
                     </div>
 
-                    {/* Reason */}
+                    {/* Reason inline */}
                     <div style={{
+                      fontSize: 11, color: isResolved ? "#94a3b8" : isInProgress ? "#92400e" : "#991b1b",
                       background: isResolved ? "#f8fafc" : isInProgress ? "#fffef0" : "#fff5f5",
-                      borderRadius: 10, padding: "10px 12px", marginBottom: 12,
                       border: `1px solid ${isResolved ? "#e2e8f0" : isInProgress ? "#fde68a" : "#fca5a5"}`,
+                      borderRadius: 7, padding: "4px 8px", marginBottom: 6,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                     }}>
-                      <div style={{
-                        fontSize: 10, fontWeight: 700, marginBottom: 4,
-                        color: isResolved ? "#94a3b8" : isInProgress ? "#a16207" : "#b91c1c",
-                        textTransform: "uppercase", letterSpacing: "0.06em",
-                      }}>Alert Reason</div>
-                      <div style={{ fontSize: 13, fontWeight: 500, color: isResolved ? "#94a3b8" : isInProgress ? "#374151" : "#7f1d1d", lineHeight: "1.5" }}>
-                        {p.alertReason ?? "—"}
-                      </div>
-                    </div>
-
-                    {/* Diagnosis + time */}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-                      <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Diagnosis</div>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: "#1e293b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {p.diagnosis.split(" ").slice(0, 3).join(" ")}
-                        </div>
-                      </div>
-                      <div style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 10px" }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Last Submitted</div>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: "#1e293b" }}>
-                          {new Date(p.lastSubmitted).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                        </div>
-                      </div>
+                      {p.alertReason ?? "—"}
                     </div>
 
                     {/* Mobile actions */}
-                    <div style={{ display: "flex", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 6 }}>
                       <Link href={`/IDpatient/${p.id}`} style={{ flex: 1 }}>
                         <button style={{
-                          width: "100%", padding: "10px 0", borderRadius: 10, border: "none",
-                          background: "#eff6ff", color: "#378ADD", fontSize: 13, fontWeight: 700, cursor: "pointer",
+                          width: "100%", padding: "7px 0", borderRadius: 8, border: "none",
+                          background: "#eff6ff", color: "#378ADD", fontSize: 12, fontWeight: 700, cursor: "pointer",
                         }}>View</button>
                       </Link>
 
                       <button
                         onClick={() => setCallModal(p)}
                         style={{
-                          flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
-                          background: "#f0fdf4", color: "#1D9E75", fontSize: 13, fontWeight: 700, cursor: "pointer",
+                          flex: 1, padding: "7px 0", borderRadius: 8, border: "none",
+                          background: "#f0fdf4", color: "#1D9E75", fontSize: 12, fontWeight: 700, cursor: "pointer",
                         }}
                       >Call</button>
 
@@ -1150,14 +1471,30 @@ export default function DashboardPage() {
                           disabled={p.isAcknowledging}
                           onClick={() => acknowledgePatient(p.id, p.alertId ?? "")}
                           style={{
-                            flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
+                            flex: 1, padding: "7px 0", borderRadius: 8, border: "none",
                             background: p.isAcknowledging ? "#f1f5f9" : "#dc2626",
                             color: p.isAcknowledging ? "#94a3b8" : "white",
-                            fontSize: 13, fontWeight: 700,
+                            fontSize: 12, fontWeight: 700,
                             cursor: p.isAcknowledging ? "not-allowed" : "pointer",
                           }}
                         >
-                          {p.isAcknowledging ? "…" : "Acknowledge"}
+                          {p.isAcknowledging ? "…" : "Ack"}
+                        </button>
+                      )}
+
+                      {isInProgress && (
+                        <button
+                          disabled={p.isAcknowledging}
+                          onClick={() => unacknowledgePatient(p.id, p.alertId ?? "")}
+                          style={{
+                            flex: 1, padding: "7px 0", borderRadius: 8, border: "none",
+                            background: "#f1f5f9",
+                            color: p.isAcknowledging ? "#94a3b8" : "#64748b",
+                            fontSize: 12, fontWeight: 700,
+                            cursor: p.isAcknowledging ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          {p.isAcknowledging ? "…" : "Undo"}
                         </button>
                       )}
 
@@ -1166,15 +1503,15 @@ export default function DashboardPage() {
                           disabled={p.isResolving}
                           onClick={() => openResolveModal(p)}
                           style={{
-                            flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
+                            flex: 1, padding: "7px 0", borderRadius: 8, border: "none",
                             background: p.isResolving ? "#f1f5f9" : "#a16207",
                             color: p.isResolving ? "#94a3b8" : "white",
-                            fontSize: 13, fontWeight: 700,
+                            fontSize: 12, fontWeight: 700,
                             cursor: p.isResolving ? "not-allowed" : "pointer",
-                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                            display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
                           }}
                         >
-                          <ClipboardCheck size={14} />
+                          <ClipboardCheck size={12} />
                           {p.isResolving ? "…" : "Resolve"}
                         </button>
                       )}
@@ -1192,6 +1529,24 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 </div>
+                {(p.inProcessByName || p.inProcessAtIst) && (
+                  <div style={{
+                    padding: "12px 24px",
+                    borderTop: "1px dotted #cbd5e1",
+                    background: isResolved ? "#f8fafc" : isInProgress ? "#fffef0" : "#fff5f5",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    color: "#64748b",
+                    fontSize: 12,
+                  }}>
+                    <ClipboardCheck size={16} />
+                    <span>
+                      <strong>{p.inProcessByName ? `In Processed by ${p.inProcessByName}` : "Processed"}</strong>
+                      {p.inProcessAtIst ? ` at ${p.inProcessAtIst}` : ""}
+                    </span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1267,52 +1622,221 @@ export default function DashboardPage() {
       </main>
 
       {/* ═══════════════════════════════════════════════════════════════════
-          CALL MODAL
+          UNSUBMITTED TODAY MODAL
       ════════════════════════════════════════════════════════════════════ */}
-      {callModal && (
+      {showUnsubmittedModal && (
         <div
           style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
-            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16,
+            position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(2px)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 450, padding: 16,
           }}
-          onClick={() => setCallModal(null)}
+          onClick={() => setShowUnsubmittedModal(false)}
         >
           <div
-            style={{ background: "white", borderRadius: 24, padding: 32, width: "100%", maxWidth: 360 }}
+            className="unsubmitted-modal-card"
+            style={{
+              width: "100%", maxWidth: 720, background: "white", borderRadius: 24,
+              boxShadow: "0 24px 80px rgba(15,23,42,0.18)", overflow: "hidden",
+              maxHeight: "90vh", display: "flex", flexDirection: "column",
+            }}
             onClick={e => e.stopPropagation()}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-              <h3 className="heading-font" style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Contact Patient</h3>
-              <button onClick={() => setCallModal(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", padding: 4 }}>
+            <div className="unsubmitted-modal-header" style={{ padding: "14px 14px 16px" }}>
+              <div className="unsubmitted-modal-title" style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <ClipboardCheck size={20} color="#0f172a" />
+                  <div>
+                    <h3 className="heading-font" style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#0f172a" }}>Patients Unsubmitted Today</h3>
+                    <p style={{ margin: "6px 0 0", color: "#64748b", fontSize: 10 }}>
+                      {unsubmittedPatients.length} patient(s) have not submitted today.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowUnsubmittedModal(false)}
+                className="unsubmitted-modal-close"
+                aria-label="Close"
+              >
                 <X size={20} />
               </button>
             </div>
-            <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 24 }}>{callModal.name}</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {callModal.contact && (
-                <a href={`tel:${callModal.contact}`} style={{ textDecoration: "none" }}>
-                  <div style={{ padding: "14px 20px", borderRadius: 14, border: "1.5px solid #1D9E75", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontWeight: 600, color: "#0f172a" }}>Patient</span>
-                    <span style={{ color: "#1D9E75", fontWeight: 600 }}>{callModal.contact}</span>
+            <div className="unsubmitted-modal-body" style={{ borderTop: "1px solid #f1f5f9", padding: "0 24px 24px", overflowY: "auto", flex: 1 }}>
+              {unsubmittedPatients.length === 0 ? (
+                <div style={{ padding: "40px 0", textAlign: "center", color: "#0f172a", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 64, height: 64, borderRadius: 24, background: "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <CheckCircle size={32} color="#15803d" />
                   </div>
-                </a>
-              )}
-              {callModal.relativeContact && (
-                <a href={`tel:${callModal.relativeContact}`} style={{ textDecoration: "none" }}>
-                  <div style={{ padding: "14px 20px", borderRadius: 14, border: "1.5px solid #378ADD", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontWeight: 600, color: "#0f172a" }}>Relative</span>
-                    <span style={{ color: "#378ADD", fontWeight: 600 }}>{callModal.relativeContact}</span>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>All patients have submitted today's response.</div>
+                  <div style={{ maxWidth: 520, color: "#64748b", fontSize: 13, lineHeight: 1.6 }}>
+                    Great work! There are no pending submissions for today, so the team is fully caught up on all active patient responses.
                   </div>
-                </a>
-              )}
-              {!callModal.contact && !callModal.relativeContact && (
-                <p style={{ color: "#94a3b8", fontSize: 13, textAlign: "center" }}>No contact info available.</p>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: 8, paddingTop: 16 }}>
+                  {unsubmittedPatients.map(patient => (
+                    <div key={patient.id} className="unsubmitted-patient-card">
+                      {/* Left: name + id + trend */}
+                      <div className="unsubmitted-patient-info">
+                        <div style={{ minWidth: 0 }}>
+                          <div className="unsubmitted-patient-name">{patient.name}</div>
+                          <div className="unsubmitted-patient-id">{patient.readable_id}</div>
+                        </div>
+                        <span className="unsubmitted-patient-trend" style={{
+                          background: patient.trend_status === "red" ? "#fee2e2" : patient.trend_status === "yellow" ? "#fef9c3" : patient.trend_status === "green" ? "#dcfce7" : "#e2e8f0",
+                          color: patient.trend_status === "red" ? "#dc2626" : patient.trend_status === "yellow" ? "#a16207" : patient.trend_status === "green" ? "#15803d" : "#64748b",
+                        }}>
+                          {patient.trend_status ? patient.trend_status.toUpperCase() : "—"}
+                        </span>
+                      </div>
+
+                      <div className="unsubmitted-divider" />
+
+                      {/* Patient contact */}
+                      <div className="unsubmitted-contact-row">
+                        <span className="unsubmitted-contact-label">Patient</span>
+                        <span className="unsubmitted-contact-number">{patient.phone ?? "—"}</span>
+                        {patient.phone && (
+                          <>
+                            <a href={`tel:${patient.phone}`}>
+                              <button className="unsubmitted-contact-btn" style={{ background: "#e1f5ee" }} title="Call patient">
+                                <Phone size={13} color="#1D9E75" />
+                              </button>
+                            </a>
+                            <button
+                              className="unsubmitted-contact-btn"
+                              style={{ background: "#f1f5f9" }}
+                              title="Copy number"
+                              onClick={() => navigator.clipboard.writeText(patient.phone!)}
+                            >
+                              <Copy size={13} color="#94a3b8" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="unsubmitted-divider" />
+
+                      {/* Relative contact */}
+                      <div className="unsubmitted-contact-row">
+                        <span className="unsubmitted-contact-label">Rel</span>
+                        <span className="unsubmitted-contact-number">{patient.relative_phone ?? "—"}</span>
+                        {patient.relative_phone && (
+                          <>
+                            <a href={`tel:${patient.relative_phone}`}>
+                              <button className="unsubmitted-contact-btn" style={{ background: "#e6f1fb" }} title="Call relative">
+                                <Phone size={13} color="#378ADD" />
+                              </button>
+                            </a>
+                            <button
+                              className="unsubmitted-contact-btn"
+                              style={{ background: "#f1f5f9" }}
+                              title="Copy number"
+                              onClick={() => navigator.clipboard.writeText(patient.relative_phone!)}
+                            >
+                              <Copy size={13} color="#94a3b8" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-            <button onClick={() => setCallModal(null)} className="btn-outline" style={{ width: "100%", marginTop: 20 }}>Close</button>
           </div>
         </div>
       )}
+
+      {/* ═══════════════════════════════════════════════════════════════════
+          CALL MODAL
+      ════════════════════════════════════════════════════════════════════ */}
+      {callModal && (
+  <div
+    style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16,
+    }}
+    onClick={() => setCallModal(null)}
+  >
+    <div
+      style={{ background: "white", borderRadius: 20, padding: "28px 24px 24px", width: "100%", maxWidth: 340 }}
+      onClick={e => e.stopPropagation()}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+        <h3 className="heading-font" style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Contact Patient</h3>
+        <button onClick={() => setCallModal(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", padding: 2 }}>
+          <X size={18} />
+        </button>
+      </div>
+      <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 20 }}>{callModal.name}</p>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {callModal.contact && (
+          <div style={{ border: "1.5px solid #1D9E75", borderRadius: 14, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", margin: "0 0 2px" }}>Patient</p>
+              <p style={{ fontSize: 14, fontWeight: 600, color: "#1D9E75", margin: 0 }}>{callModal.contact}</p>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+              <a href={`tel:${callModal.contact}`}>
+                <button style={{ width: 36, height: 36, borderRadius: 10, background: "#e1f5ee", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Phone size={16} color="#1D9E75" />
+                </button>
+              </a>
+              <a href={`sms:${callModal.contact}`}>
+                <button style={{ width: 36, height: 36, borderRadius: 10, background: "#e1f5ee", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <MessageCircle size={16} color="#1D9E75" />
+                </button>
+              </a>
+              <button
+                onClick={() => callModal.contact && navigator.clipboard.writeText(callModal.contact)}
+                style={{ width: 36, height: 36, borderRadius: 10, background: "#f1f5f9", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <Copy size={16} color="#94a3b8" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {callModal.relativeContact && (
+          <div style={{ border: "1.5px solid #378ADD", borderRadius: 14, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", margin: "0 0 2px" }}>Relative</p>
+              <p style={{ fontSize: 14, fontWeight: 600, color: "#378ADD", margin: 0 }}>{callModal.relativeContact}</p>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+              <a href={`tel:${callModal.relativeContact}`}>
+                <button style={{ width: 36, height: 36, borderRadius: 10, background: "#e6f1fb", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Phone size={16} color="#378ADD" />
+                </button>
+              </a>
+              <a href={`sms:${callModal.relativeContact}`}>
+                <button style={{ width: 36, height: 36, borderRadius: 10, background: "#e6f1fb", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <MessageCircle size={16} color="#378ADD" />
+                </button>
+              </a>
+              <button
+                onClick={() => callModal.relativeContact && navigator.clipboard.writeText(callModal.relativeContact)}
+                style={{ width: 36, height: 36, borderRadius: 10, background: "#f1f5f9", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <Copy size={16} color="#94a3b8" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!callModal.contact && !callModal.relativeContact && (
+          <p style={{ color: "#94a3b8", fontSize: 13, textAlign: "center" }}>No contact info available.</p>
+        )}
+      </div>
+
+      <button onClick={() => setCallModal(null)} style={{ width: "100%", marginTop: 16, padding: 13, borderRadius: 14, border: "1px solid #e2e8f0", background: "white", fontSize: 15, cursor: "pointer" }}>
+        Close
+      </button>
+    </div>
+  </div>
+)}
 
       {/* ═══════════════════════════════════════════════════════════════════
           RESOLVE MODAL

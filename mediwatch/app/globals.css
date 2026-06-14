@@ -63,6 +63,7 @@ body {
 
 /* ── Grid helpers ── */
 .responsive-grid-4,
+.responsive-grid-5,
 .responsive-grid-3,
 .responsive-grid-2,
 .responsive-form-grid-2,
@@ -75,6 +76,9 @@ body {
 .responsive-grid-3         { grid-template-columns: repeat(3, minmax(0,1fr)); }
 .responsive-grid-2,
 .responsive-form-grid-2    { grid-template-columns: repeat(2, minmax(0,1fr)); }
+
+/* Five-column variant for wide desktop screens */
+.responsive-grid-5         { grid-template-columns: repeat(5, minmax(0,1fr)); }
 .responsive-form-grid-3    { grid-template-columns: repeat(3, minmax(0,1fr)); }
 
 .responsive-table-grid {
@@ -140,7 +144,7 @@ body {
   .responsive-grid-3,
   .responsive-form-grid-3      { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .responsive-grid-2,
-  .responsive-form-grid-2      { grid-template-columns: 1fr; }
+  .responsive-form-grid-2      { grid-template-columns: repeat(2, minmax(0,1fr)); }
 
   /* Keep six-column table on tablet but reduce widths of smaller columns */
   .responsive-table-grid-6     { grid-template-columns: minmax(160px,1.6fr) 0.7fr 0.9fr 0.5fr 0.5fr 1fr; }
@@ -157,6 +161,7 @@ body {
 
   /* Stat cards: 2 columns on mobile */
   .responsive-grid-4           { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+  .responsive-grid-5           { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
   .responsive-grid-3,
   .responsive-grid-2,
   .responsive-form-grid-3,
@@ -181,7 +186,7 @@ body {
     display: block !important;
     position: relative;
     padding: 16px 16px 16px 20px;
-    margin-bottom: 5px;
+    margin-bottom: 0px;
     /* background: rgb(249, 247, 247); */
     border-bottom: 2px solid #1010110d !important;
     cursor: pointer;
