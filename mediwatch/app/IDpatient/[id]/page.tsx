@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import {
-  ArrowLeft, User, Phone, MapPin, Calendar, Activity,
+  ArrowLeft, RefreshCcw, User, Phone, MapPin, Calendar, Activity,
   AlertTriangle, CheckCircle2, Clock, ChevronDown, ChevronUp,
   TrendingUp, TrendingDown, Minus, AlertCircle, Info,
   Heart, Shield, FileText, BarChart2, List, ChevronRight,
@@ -69,22 +69,30 @@ interface LatestSubmission {
   submitted_at: string;
 }
 
+interface QuestionOption {
+  label: string;
+  value: number;
+}
+
 interface Question {
   question_key: string;
   question_text: string;
-  question_type: string;
+  question_type: string; // "range" | "selection" (backend may add more types over time)
   display_order: number;
   min_value: number;
   max_value: number;
+  question_options?: QuestionOption[]; // present when question_type === "selection"
 }
 
 interface EnrichedAnswer {
   question_text: string;
-  question_type: string;
+  question_type: string; // "range" | "selection"
   min_value: number;
   max_value: number;
   display_order: number;
   value: number;
+  question_options?: QuestionOption[]; // present when question_type === "selection"
+  selection_label?: string; // human-readable label of the chosen option, when question_type === "selection"
 }
 
 interface EnrichedOverrideAnswer {
@@ -210,6 +218,19 @@ function pickAlertIso(alert: any, keyBase: "created_at" | "in_process_at" | "res
   return null;
 }
 
+function getImageUrl(path: string | null | undefined): string {
+  if (!path) return "";
+  const trimmed = path.toString().trim();
+  if (trimmed === "") return "";
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
+  const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  try {
+    return new URL(normalized, "https://api.mediwatch.in").toString();
+  } catch {
+    return `https://api.mediwatch.in${normalized}`;
+  }
+}
+
 function transformOverridePoint(raw: any): OverridePoint {
   const answers = raw.overrideAnswers ?? {};
   return {
@@ -283,6 +304,53 @@ function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
       <div style={{ flex: 1, height: 8, borderRadius: 99, background: "#f1f5f9", overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", borderRadius: 99, background: scoreColors.color, transition: "width 0.6s ease" }} />
       </div>
+    </div>
+  );
+}
+
+// Severity color for any min/max scale, normalized onto the same 0–10 bands
+// getScoreColor() uses. This lets selection-type questions (e.g. 0–2 scale)
+// and range-type questions (e.g. 0–10 scale) share one consistent color logic,
+// with zero visual change for existing 0–10 range questions.
+function getScaledColor(value: number | null | undefined, max: number | null | undefined): ScoreColorObj {
+  if (value == null) return getScoreColor(undefined);
+  const m = max && max > 0 ? max : 10;
+  return getScoreColor((value / m) * 10);
+}
+
+function isSelectionType(type: string | null | undefined): boolean {
+  return type === "selection";
+}
+
+// Compact pill row for selection-type questions — shows every available option,
+// highlighting the chosen one. Wraps naturally on narrow screens.
+function SelectionPills({ options, value, max }: {
+  options: QuestionOption[]; value: number | null; max: number;
+}) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {options.slice().sort((a, b) => a.value - b.value).map((opt) => {
+        const isActive = value !== null && opt.value === value;
+        const activeColors = getScaledColor(opt.value, max);
+        return (
+          <span
+            key={opt.value}
+            style={{
+              padding: "5px 11px",
+              borderRadius: 99,
+              fontSize: 11,
+              fontWeight: isActive ? 800 : 600,
+              lineHeight: 1.3,
+              color: isActive ? activeColors.color : "#94a3b8",
+              background: isActive ? activeColors.background : "#f1f5f9",
+              border: `1.5px solid ${isActive ? `${activeColors.color}55` : "#e2e8f0"}`,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {opt.label}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -597,54 +665,62 @@ export default function PatientDetailPage() {
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
   const [historyAlerts, setHistoryAlerts] = useState<HistoryAlert[]>([]);
   const [reminderModalAlert, setReminderModalAlert] = useState<any>(null);
+  const [galleryImages, setGalleryImages] = useState<string[]>([]);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const [galleryDayLabel, setGalleryDayLabel] = useState<string>("");
 
   const routerRef = useRef(router);
   useEffect(() => { routerRef.current = router; }, [router]);
 
-  useEffect(() => {
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadAll = useCallback(async (showPageLoader = false) => {
     if (!id) return;
-    async function loadAll() {
-      setLoading(true);
-      setError(null);
-      const token = getToken();
-      if (!token) { routerRef.current.replace("/login"); return; }
-      const headers = { Authorization: `Bearer ${token}` };
-      const BASE = "https://api.mediwatch.in/api/v1";
-      try {
-        const [detailRes, historyRes] = await Promise.all([
-          fetch(`${BASE}/doctor/patients/${id}`, { headers }),
-          fetch(`${BASE}/doctor/patients/${id}/history`, { headers }),
-        ]);
-        if (detailRes.status === 401 || historyRes.status === 401) {
-          localStorage.removeItem("doctor_token");
-          routerRef.current.replace("/login");
-          return;
-        }
-        if (!detailRes.ok) throw new Error(`Failed to load patient (${detailRes.status})`);
-        if (!historyRes.ok) throw new Error(`Failed to load history (${historyRes.status})`);
-        const detailJson = await detailRes.json();
-        const historyJson = await historyRes.json();
-        const d = detailJson?.data;
-        const h = historyJson?.data;
-        setPatient(d?.patient ?? null);
-        setOverrideQs(d?.overrideQuestions ?? []);
-        setLatestSub(d?.latestSubmission ?? null);
-        setActiveAlerts(d?.activeAlerts ?? []);
-        const qs = h?.questions ?? [];
-        setQuestions(qs);
-        if (qs.length > 0) setSelectedQKey(qs[0].question_key);
-        setSubmissions(h?.submissions ?? []);
-        setBasdaiGraph(h?.basdaiGraph ?? []);
-        setOverrideGraph(Array.isArray(h?.overrideGraph) ? h.overrideGraph.map(transformOverridePoint) : []);
-        setHistoryAlerts(h?.alerts ?? []);
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Something went wrong.");
-      } finally {
-        setLoading(false);
+    if (showPageLoader) setLoading(true);
+    setRefreshing(true);
+    setError(null);
+    const token = getToken();
+    if (!token) { routerRef.current.replace("/login"); setRefreshing(false); if (showPageLoader) setLoading(false); return; }
+    const headers = { Authorization: `Bearer ${token}` };
+    const BASE = "https://api.mediwatch.in/api/v1";
+    try {
+      const [detailRes, historyRes] = await Promise.all([
+        fetch(`${BASE}/doctor/patients/${id}`, { headers }),
+        fetch(`${BASE}/doctor/patients/${id}/history`, { headers }),
+      ]);
+      if (detailRes.status === 401 || historyRes.status === 401) {
+        localStorage.removeItem("doctor_token");
+        routerRef.current.replace("/login");
+        return;
       }
+      if (!detailRes.ok) throw new Error(`Failed to load patient (${detailRes.status})`);
+      if (!historyRes.ok) throw new Error(`Failed to load history (${historyRes.status})`);
+      const detailJson = await detailRes.json();
+      const historyJson = await historyRes.json();
+      const d = detailJson?.data;
+      const h = historyJson?.data;
+      setPatient(d?.patient ?? null);
+      setOverrideQs(d?.overrideQuestions ?? []);
+      setLatestSub(d?.latestSubmission ?? null);
+      setActiveAlerts(d?.activeAlerts ?? []);
+      const qs = h?.questions ?? [];
+      setQuestions(qs);
+      if (qs.length > 0) setSelectedQKey(qs[0].question_key);
+      setSubmissions(h?.submissions ?? []);
+      setBasdaiGraph(h?.basdaiGraph ?? []);
+      setOverrideGraph(Array.isArray(h?.overrideGraph) ? h.overrideGraph.map(transformOverridePoint) : []);
+      setHistoryAlerts(h?.alerts ?? []);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Something went wrong.");
+    } finally {
+      if (showPageLoader) setLoading(false);
+      setRefreshing(false);
     }
-    loadAll();
   }, [id]);
+
+  useEffect(() => {
+    loadAll(true);
+  }, [loadAll]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const rm = RISK_META[patient?.risk_category ?? "low"];
@@ -789,40 +865,77 @@ export default function PatientDetailPage() {
       <Sidebar />
       <main className="main-content" style={{ paddingBottom: 48 }}>
 
-        {/* ── Back Button ── */}
-        <button
-          onClick={() => router.back()}
-          style={{
-            position: "sticky",
-            top: 10,
-            zIndex: 20,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            background: "rgb(55, 138, 221)",
-            cursor: "pointer",
-            color: "white",
-            borderRadius: 8,
-            fontSize: 14,
-            fontWeight: 600,
-            padding: "8px 8px",
-            border: "2px solid #c4d3e1",
-            marginBottom: 10,
-            transition: "box-shadow 0.3s ease, transform 0.2s ease",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.boxShadow =
-              "0 8px 20px rgba(55, 138, 221, 0.4)";
-            e.currentTarget.style.transform = "translateY(-2px)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.boxShadow = "none";
-            e.currentTarget.style.transform = "translateY(0)";
-          }}
-        >
-          <ArrowLeft size={16} />
-          Back
-        </button>
+        {/* ── Back + Refresh Buttons ── */}
+        <div style={{
+          position: "sticky",
+          top: 10,
+          zIndex: 20,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 10,
+        }}>
+          <button
+            onClick={() => router.back()}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              background: "rgb(55, 138, 221)",
+              cursor: "pointer",
+              color: "white",
+              borderRadius: 8,
+              fontSize: 14,
+              fontWeight: 600,
+              padding: "8px 12px",
+              border: "2px solid #c4d3e1",
+              transition: "box-shadow 0.3s ease, transform 0.2s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.boxShadow =
+                "0 8px 20px rgba(55, 138, 221, 0.4)";
+              e.currentTarget.style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.boxShadow = "none";
+              e.currentTarget.style.transform = "translateY(0)";
+            }}
+          >
+            <ArrowLeft size={16} />
+            Back
+          </button>
+          <button
+            onClick={() => loadAll(false)}
+            disabled={refreshing || loading}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              background: "white",
+              color: "rgb(55, 138, 221)",
+              borderRadius: 8,
+              fontSize: 14,
+              fontWeight: 600,
+              padding: "8px 12px",
+              border: "2px solid rgba(55, 138, 221, 0.18)",
+              cursor: refreshing || loading ? "not-allowed" : "pointer",
+              transition: "box-shadow 0.3s ease, transform 0.2s ease, opacity 0.2s ease",
+              opacity: refreshing || loading ? 1 : 1,
+            }}
+            onMouseEnter={(e) => {
+              if (refreshing || loading) return;
+              e.currentTarget.style.boxShadow = "0 8px 20px rgba(55, 138, 221, 0.16)";
+              e.currentTarget.style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.boxShadow = "none";
+              e.currentTarget.style.transform = "translateY(0)";
+            }}
+          >
+            <RefreshCcw size={16} />
+            {refreshing ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
 
         {/* ══════════════════════════════════════════════════════════════
             HEADER
@@ -986,20 +1099,34 @@ export default function PatientDetailPage() {
                     ? (submissions.find(s => s.day_number === latestSub.day_number)?.answers?.[q.question_key] ?? null)
                     : null;
                   const latestAnswer = enrichedAnswer != null ? enrichedAnswer.value : null;
+                  const hasOptions = Array.isArray(q.question_options) && q.question_options.length > 0;
+                  const isSelection = isSelectionType(q.question_type) && hasOptions;
+                  const selectedLabel = isSelection && latestAnswer !== null
+                    ? (q.question_options!.find(o => o.value === latestAnswer)?.label ?? enrichedAnswer?.selection_label ?? null)
+                    : null;
+                  const selColors = getScaledColor(latestAnswer, q.max_value);
                   return (
                     <div key={q.question_key} style={{ padding: "10px 12px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: latestAnswer !== null ? 6 : 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: latestAnswer !== null ? 8 : 0 }}>
                         <div style={{ flex: 1, paddingRight: 10 }}>
                           <span style={{ fontSize: 10, fontWeight: 800, color: "#378ADD", textTransform: "uppercase", letterSpacing: "0.07em" }}>Q{i + 1}</span>
                           <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{q.question_text}</div>
                         </div>
-                        {latestAnswer !== null && (
+                        {latestAnswer !== null && !isSelection && (
                           <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: latestAnswer >= 6 ? "#fee2e2" : latestAnswer >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <span style={{ fontWeight: 800, fontSize: 14, color: latestAnswer >= 6 ? "#dc2626" : latestAnswer >= 4 ? "#a16207" : "#15803d" }}>{latestAnswer}</span>
                           </div>
                         )}
+                        {isSelection && selectedLabel && (
+                          <div style={{ flexShrink: 0, maxWidth: 130, padding: "5px 10px", borderRadius: 8, background: selColors.background, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <span style={{ fontWeight: 800, fontSize: 11, color: selColors.color, textAlign: "right", lineHeight: 1.3 }}>{selectedLabel}</span>
+                          </div>
+                        )}
                       </div>
-                      {latestAnswer !== null && <ScoreBar value={latestAnswer} max={q.max_value} />}
+                      {latestAnswer !== null && !isSelection && <ScoreBar value={latestAnswer} max={q.max_value} />}
+                      {isSelection && latestAnswer !== null && (
+                        <SelectionPills options={q.question_options!} value={latestAnswer} max={q.max_value} />
+                      )}
                     </div>
                   );
                 })}
@@ -1239,104 +1366,312 @@ export default function PatientDetailPage() {
                 const isOpen = expandedDay === sub.day_number;
                 const isMissing = (sub as any).status === "missed" || (sub as any).missingSubmission === true;
                 const hasOverride = !isMissing && sub.override_triggered === true;
+                const imgCount = (!isMissing && sub.images?.length) ? sub.images.length : 0;
+                const scoreColor = isMissing ? { color: "#94a3b8", background: "#f1f5f9" } : getScoreColor(sub.disease_score);
+                const scoreLevel = isMissing ? "—" : sub.disease_score < 4 ? "Low" : sub.disease_score < 6 ? "Medium" : "High";
+
                 return (
-                  <div key={sub.id ?? `missing-${sub.day_number}`} style={{ borderRadius: 16, border: `1.5px solid ${isOpen ? "#378ADD33" : "#f1f5f9"}`, overflow: "hidden", transition: "border-color 0.2s" }}>
+                  <div
+                    key={sub.id ?? `missing-${sub.day_number}`}
+                    style={{
+                      borderRadius: 16,
+                      border: `1.5px solid ${isOpen ? "#378ADD44" : "#f1f5f9"}`,
+                      overflow: "hidden",
+                      transition: "border-color 0.2s, box-shadow 0.2s",
+                      boxShadow: isOpen ? "0 4px 20px rgba(55,138,221,0.10)" : "none",
+                    }}
+                  >
+                    {/* ── Accordion Header ── */}
                     <button
                       onClick={() => setExpandedDay(isOpen ? null : sub.day_number)}
-                      style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", background: isOpen ? "#f0f7ff" : "#f8fafc", border: "none", cursor: "pointer", transition: "background 0.15s", gap: 12 }}
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "14px 16px",
+                        background: isOpen ? "#f0f7ff" : "#f8fafc",
+                        border: "none",
+                        cursor: "pointer",
+                        transition: "background 0.15s",
+                        gap: 10,
+                        textAlign: "left",
+                        flexWrap: "wrap",
+                      }}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-                        <div className="heading-font" style={{ fontSize: 16, fontWeight: 800, color: isOpen ? "#378ADD" : "#0f172a" }}>Day {sub.day_number}</div>
-                        {!isMissing && <span style={{ fontSize: 11, color: "#94a3b8" }}>{fmtTime(sub.submitted_at)}</span>}
-                        {isMissing ? (
-                          <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#f1f5f9", color: "#64748b" }}>Not submitted</span>
-                        ) : hasOverride ? (
-                          <span style={{ padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#fee2e2", color: "#dc2626" }}>🚨 Override</span>
-                        ) : null}
+                      {/* Left: Day label + badges */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flex: "1 1 0", minWidth: 0 }}>
+                        {/* Day badge */}
+                        <div style={{
+                          flexShrink: 0,
+                          width: 42, height: 42, borderRadius: 12,
+                          background: isOpen ? "#378ADD" : (isMissing ? "#e2e8f0" : "#1e293b"),
+                          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                          gap: 0,
+                        }}>
+                          <span style={{ fontSize: 8, fontWeight: 700, color: isOpen ? "#bfdbfe" : (isMissing ? "#94a3b8" : "#94a3b8"), letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1 }}>DAY</span>
+                          <span className="heading-font" style={{ fontSize: 18, fontWeight: 900, color: isOpen ? "white" : (isMissing ? "#64748b" : "white"), lineHeight: 1 }}>{sub.day_number}</span>
+                        </div>
+
+                        {/* Date + status chips */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: "1 1 auto" }}>
+                          {!isMissing && (
+                            <span style={{ fontSize: 11, color: "#64748b", fontWeight: 500, whiteSpace: "normal" }}>{fmtTime(sub.submitted_at)}</span>
+                          )}
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            {isMissing ? (
+                              <span style={{ padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#f1f5f9", color: "#64748b", border: "1px solid #e2e8f0" }}>Not submitted</span>
+                            ) : (
+                              <>
+                                {hasOverride && (
+                                  <span style={{ padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5" }}>🚨 Override</span>
+                                )}
+                                {imgCount > 0 && (
+                                  <span style={{ padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600, background: "#f0f9ff", color: "#0369a1", border: "1px solid #bae6fd" }}>
+                                    📷 {imgCount} {imgCount === 1 ? "photo" : "photos"}
+                                  </span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        {isMissing ? (
-                          <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: "#f1f5f9", color: "#64748b" }}>—</span>
-                        ) : (
-                          <span style={{ padding: "4px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: getScoreColor(sub.disease_score).background, color: getScoreColor(sub.disease_score).color }}>
-                            {formatScore(sub.disease_score)} — {sub.disease_score < 4 ? "Low" : sub.disease_score < 6 ? "Medium" : "High"}
-                          </span>
+
+                      {/* Right: Score + priority chips + chevron */}
+                      <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-end",
+                        gap: 10,
+                        flexWrap: "wrap",
+                        minWidth: 0,
+                        maxWidth: "100%",
+                      }}>
+                        {!isMissing && (
+                          <>
+                            <div style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 4,
+                              minWidth: 0,
+                              background: scoreColor.background,
+                              border: `1px solid ${scoreColor.color}33`,
+                              padding: "10px 12px",
+                              borderRadius: 14,
+                            }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: scoreColor.color, textTransform: "uppercase", letterSpacing: "0.06em" }}>Score</span>
+                              <div className="heading-font" style={{ fontSize: 17, fontWeight: 900, color: scoreColor.color, lineHeight: 1.1 }}>{formatScore(sub.disease_score)}</div>
+                            </div>
+                            <div style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 4,
+                              minWidth: 0,
+                              background: sub.priority_value >= 8 ? "#f5dbff" : sub.priority_value >= 5 ? "#ede9fe" : "#f8f3ff",
+                              border: `1px solid ${sub.priority_value >= 8 ? "#c084fc" : sub.priority_value >= 5 ? "#a855f7" : "#c084fc"}33`,
+                              padding: "10px 12px",
+                              borderRadius: 14,
+                            }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: sub.priority_value >= 8 ? "#9333ea" : sub.priority_value >= 5 ? "#7c3aed" : "#a855f7", textTransform: "uppercase", letterSpacing: "0.06em" }}>Priority</span>
+                              <div className="heading-font" style={{ fontSize: 17, fontWeight: 900, color: sub.priority_value >= 8 ? "#9333ea" : sub.priority_value >= 5 ? "#7c3aed" : "#a855f7", lineHeight: 1.1 }}>{sub.priority_value}</div>
+                            </div>
+                          </>
                         )}
-                        {isOpen ? <ChevronUp size={16} color="#94a3b8" /> : <ChevronDown size={16} color="#94a3b8" />}
+                        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          {isOpen
+                            ? <ChevronUp size={16} color="#94a3b8" />
+                            : <ChevronDown size={16} color="#94a3b8" />}
+                        </div>
                       </div>
                     </button>
+
+                    {/* ── Expanded Body ── */}
                     {isOpen && (
-                      <div style={{ padding: "20px", borderTop: "1px solid #f1f5f9", background: "white" }}>
+                      <div style={{ borderTop: "1px solid #f1f5f9", background: "white" }}>
                         {isMissing ? (
-                          <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.7 }}>
+                          <div style={{ padding: "20px", fontSize: 13, color: "#475569", lineHeight: 1.7 }}>
                             No submission was recorded for this day. The patient did not submit their daily report.
                           </div>
                         ) : (
                           <>
-                            <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-                              {[
-                                { label: "Disease Score", value: formatScore(sub.disease_score), color: getScoreColor(sub.disease_score).color, bg: getScoreColor(sub.disease_score).background },
-                                { label: "Priority Value", value: sub.priority_value, color: "#a855f7", bg: "#faf5ff" },
-                              ].map(stat => (
-                                <div key={stat.label} style={{ padding: "12px 20px", borderRadius: 14, background: stat.bg, display: "flex", flexDirection: "column", alignItems: "center" }}>
-                                  <span style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em" }}>{stat.label}</span>
-                                  <span className="heading-font" style={{ fontSize: 24, fontWeight: 800, color: stat.color, marginTop: 2 }}>{stat.value}</span>
-                                </div>
-                              ))}
-                            </div>
+                            {/* ── Symptom Answers ── */}
                             {sub.answers && Object.keys(sub.answers).length > 0 && (
-                              <>
-                                <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 12 }}>Symptom Answers</div>
-                                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                              <div style={{ padding: "0 16px 16px" }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Symptom Answers</div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                                   {Object.entries(sub.answers)
                                     .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
-                                    .map(([key, ans], i) => (
-                                      <div key={key} style={{ padding: "10px 14px", borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9" }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                                          <div style={{ flex: 1, paddingRight: 10 }}>
-                                            <span style={{ fontSize: 10, fontWeight: 800, color: Q_COLORS[i % Q_COLORS.length], textTransform: "uppercase", letterSpacing: "0.07em" }}>Q{i + 1}</span>
-                                            <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, marginTop: 3, lineHeight: 1.3 }}>{ans.question_text}</div>
-                                          </div>
-                                          <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, background: ans.value >= 6 ? "#fee2e2" : ans.value >= 4 ? "#fef9c3" : "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                            <span style={{ fontWeight: 800, fontSize: 14, color: ans.value >= 6 ? "#dc2626" : ans.value >= 4 ? "#a16207" : "#15803d" }}>{ans.value}</span>
+                                    .map(([key, ans], i) => {
+                                      const qColor = Q_COLORS[i % Q_COLORS.length];
+                                      const hasOptions = Array.isArray(ans.question_options) && ans.question_options.length > 0;
+                                      const isSelection = isSelectionType(ans.question_type) && hasOptions;
+                                      const valColor = ans.value >= 6 ? "#dc2626" : ans.value >= 4 ? "#a16207" : "#15803d";
+                                      const valBg = ans.value >= 6 ? "#fee2e2" : ans.value >= 4 ? "#fef9c3" : "#dcfce7";
+                                      const selColors = getScaledColor(ans.value, ans.max_value);
+                                      const selectedLabel = isSelection
+                                        ? (ans.question_options!.find(o => o.value === ans.value)?.label ?? ans.selection_label ?? null)
+                                        : null;
+                                      return (
+                                        <div key={key} style={{ borderRadius: 12, background: "#f8fafc", border: "1px solid #f1f5f9", overflow: "hidden" }}>
+                                          <div style={{ display: "flex", alignItems: "center", gap: 0 }}>
+                                            {/* Q# badge */}
+                                            <div style={{ width: 36, flexShrink: 0, alignSelf: "stretch", background: `${qColor}18`, display: "flex", alignItems: "center", justifyContent: "center", borderRight: `2px solid ${qColor}33` }}>
+                                              <span style={{ fontSize: 10, fontWeight: 900, color: qColor, textTransform: "uppercase", letterSpacing: "0.05em" }}>Q{i + 1}</span>
+                                            </div>
+                                            <div style={{ flex: 1, padding: "10px 12px", minWidth: 0 }}>
+                                              <div style={{ fontSize: 12, color: "#374151", fontWeight: 500, lineHeight: 1.4, marginBottom: 8 }}>{ans.question_text}</div>
+                                              {isSelection ? (
+                                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                                  {selectedLabel && (
+                                                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                                                      {/* <span style={{
+                                                        maxWidth: "100%", padding: "4px 10px", borderRadius: 8,
+                                                        background: selColors.background, border: `1px solid ${selColors.color}33`,
+                                                        fontWeight: 800, fontSize: 12, color: selColors.color,
+                                                      }}>
+                                                        {selectedLabel}
+                                                      </span> */}
+                                                    </div>
+                                                  )}
+                                                  <SelectionPills options={ans.question_options!} value={ans.value} max={ans.max_value} />
+                                                  
+                                                </div>
+                                              ) : (
+                                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                                  <div style={{ flex: 1, height: 6, borderRadius: 99, background: "#e2e8f0", overflow: "hidden" }}>
+                                                    <div style={{ width: `${Math.min(100, (ans.value / (ans.max_value || 10)) * 100)}%`, height: "100%", borderRadius: 99, background: valColor, transition: "width 0.6s ease" }} />
+                                                  </div>
+                                                  <div style={{ flexShrink: 0, minWidth: 40, height: 32, borderRadius: 8, background: valBg, display: "flex", alignItems: "center", justifyContent: "center", border: `1px solid ${valColor}33` }}>
+                                                    <span style={{ fontWeight: 900, fontSize: 14, color: valColor }}>{ans.value}</span>
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
                                           </div>
                                         </div>
-                                        <ScoreBar value={ans.value} max={ans.max_value} />
-                                      </div>
-                                    ))}
+                                      );
+                                    })}
                                 </div>
-                              </>
+                              </div>
                             )}
-                            {sub.override_answers && Object.keys(sub.override_answers).length > 0 && (
-                              <>
-                                <div style={{ fontSize: 12, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Override Alerts</div>
-                                {Object.entries(sub.override_answers)
-                                  .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
-                                  .map(([key, ans]) => (
-                                    <div key={key} style={{
-                                      padding: "10px 14px", borderRadius: 10,
-                                      background: ans.triggered ? "#fef2f2" : "#f0fdf4",
-                                      border: `1px solid ${ans.triggered ? "#fca5a5" : "#86efac"}`,
-                                      display: "flex", justifyContent: "space-between", alignItems: "center",
-                                      fontSize: 13, marginBottom: 8,
-                                    }}>
-                                      <span style={{ color: "#374151" }}>{ans.question_text}</span>
-                                      <span style={{ fontWeight: 700, color: ans.triggered ? "#dc2626" : "#15803d", flexShrink: 0, marginLeft: 12 }}>
-                                        {ans.triggered ? "🚨 Triggered" : "✓ Clear"}
-                                      </span>
+
+                            {/* ── Override Alerts + Wound Images row ── */}
+                            {((sub.override_answers && Object.keys(sub.override_answers).length > 0) || imgCount > 0) && (
+                              <div className="history-bottom-row">
+
+                                {/* Override Alerts */}
+                                {sub.override_answers && Object.keys(sub.override_answers).length > 0 && (
+                                  <div className="history-override-col">
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                                      <AlertTriangle size={13} color="#dc2626" />
+                                      Override Alerts
                                     </div>
-                                  ))}
-                              </>
-                            )}
-                            {sub.images && sub.images.length > 0 && (
-                              <div style={{ marginTop: 12 }}>
-                                <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 10 }}>Attached Images</div>
-                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                  {sub.images.map((img, idx) => (
-                                    <img key={idx} src={img} alt={`Submission image ${idx + 1}`}
-                                      style={{ width: 80, height: 80, borderRadius: 10, objectFit: "cover", border: "1px solid #e2e8f0" }} />
-                                  ))}
-                                </div>
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                                      {Object.entries(sub.override_answers)
+                                        .sort(([, a], [, b]) => (a.display_order ?? 999) - (b.display_order ?? 999))
+                                        .map(([key, ans]) => (
+                                          <div key={key} style={{
+                                            padding: "10px 12px", borderRadius: 10,
+                                            background: ans.triggered ? "#fef2f2" : "#f0fdf4",
+                                            border: `1px solid ${ans.triggered ? "#fca5a5" : "#86efac"}`,
+                                            display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+                                            gap: 10,
+                                          }}>
+                                            <span style={{ color: "#374151", fontSize: 12, flex: 1, lineHeight: 1.4 }}>{ans.question_text}</span>
+                                            <span style={{
+                                              flexShrink: 0, fontWeight: 700, fontSize: 11,
+                                              padding: "3px 9px", borderRadius: 99,
+                                              background: ans.triggered ? "#dc2626" : "#15803d",
+                                              color: "white",
+                                            }}>
+                                              {ans.triggered ? "🚨 Yes" : "✓ No"}
+                                            </span>
+                                          </div>
+                                        ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Wound Images */}
+                                {imgCount > 0 && (
+                                  <div className="history-images-col">
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: "#0369a1", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                                      <FileText size={13} color="#0369a1" />
+                                      Wound Photos ({imgCount})
+                                    </div>
+                                    {/* Thumbnail grid — max 5 */}
+                                    <div className="history-image-grid">
+                                      {sub.images.slice(0, 5).map((img, idx) => {
+                                        const isLast = idx === 4 && imgCount > 5;
+                                        return (
+                                          <button
+                                            key={idx}
+                                            type="button"
+                                            onClick={() => {
+                                              setGalleryImages(sub.images.map(getImageUrl));
+                                              setGalleryIndex(idx);
+                                              setGalleryDayLabel(`Day ${sub.day_number}`);
+                                            }}
+                                            style={{
+                                              position: "relative",
+                                              aspectRatio: "1 / 1",
+                                              borderRadius: 12,
+                                              overflow: "hidden",
+                                              border: "1.5px solid #e2e8f0",
+                                              background: "#f8fafc",
+                                              cursor: "pointer",
+                                              padding: 0,
+                                              transition: "transform 0.15s, box-shadow 0.15s",
+                                            }}
+                                            onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.18)"; }}
+                                            onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "none"; }}
+                                          >
+                                            <img
+                                              src={getImageUrl(img)}
+                                              alt={`Wound photo ${idx + 1} – Day ${sub.day_number}`}
+                                              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+                                            />
+                                            {/* "View all" overlay on last thumbnail when > 5 images */}
+                                            {isLast && (
+                                              <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                                <span style={{ color: "white", fontWeight: 800, fontSize: 14 }}>+{imgCount - 5}</span>
+                                              </div>
+                                            )}
+                                            {/* Index dot */}
+                                            {!isLast && (
+                                              <div style={{ position: "absolute", bottom: 5, right: 5, background: "rgba(0,0,0,0.45)", borderRadius: 6, padding: "2px 6px", fontSize: 9, fontWeight: 700, color: "white" }}>
+                                                {idx + 1}/{imgCount}
+                                              </div>
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setGalleryImages(sub.images.map(getImageUrl));
+                                        setGalleryIndex(0);
+                                        setGalleryDayLabel(`Day ${sub.day_number}`);
+                                      }}
+                                      style={{
+                                        marginTop: 10, width: "100%",
+                                        padding: "8px 0", borderRadius: 10,
+                                        border: "1.5px solid #bae6fd",
+                                        background: "#f0f9ff", color: "#0369a1",
+                                        fontSize: 12, fontWeight: 700, cursor: "pointer",
+                                        display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                        transition: "background 0.15s",
+                                      }}
+                                      onMouseEnter={e => { e.currentTarget.style.background = "#e0f2fe"; }}
+                                      onMouseLeave={e => { e.currentTarget.style.background = "#f0f9ff"; }}
+                                    >
+                                      <ChevronRight size={14} />
+                                      View all {imgCount} photos
+                                    </button>
+                                  </div>
+                                )}
+
                               </div>
                             )}
                           </>
@@ -1354,7 +1689,159 @@ export default function PatientDetailPage() {
                 SECTION 6 — ALERT HISTORY
             ══════════════════════════════════════════════════════════════ */}
 
-            {/* Reminder Details Modal */}
+            {/* ── Image Gallery Modal ── */}
+            {galleryImages.length > 0 && (
+              <div
+                onClick={() => setGalleryImages([])}
+                style={{
+                  position: "fixed", inset: 0, background: "rgba(255, 255, 255, 0.56)",backdropFilter: "blur(2px)",
+                  display: "flex", alignItems: "stretch", justifyContent: "center",
+                  zIndex: 500, padding: 0,
+                }}
+              >
+                <div
+                  onClick={e => e.stopPropagation()}
+                  style={{
+                    width: "100%", maxWidth: 1000,
+                    display: "flex", flexDirection: "column",
+                    margin: "auto",
+                    height: "1000px",
+                    maxHeight: "75vh", borderRadius: 20, overflow: "hidden",
+                  }}
+                >
+                  {/* Top bar */}
+                  <div style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "12px 16px",
+                    background: "rgba(0, 0, 0, 0.7)",
+                    backdropFilter: "blur(10px)",
+                    flexShrink: 0, gap: 12,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(245, 245, 245, 0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <FileText size={15} color="white" />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "white" }}>{galleryDayLabel} — Wound Photos</div>
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginTop: 1 }}>Photo {galleryIndex + 1} of {galleryImages.length}</div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setGalleryImages([])}
+                      style={{
+                        width: 36, height: 36, borderRadius: 10,
+                        border: "1px solid rgba(255,255,255,0.2)",
+                        background: "rgba(255,255,255,0.1)", cursor: "pointer", color: "white",
+                        fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center",
+                        flexShrink: 0, transition: "background 0.15s",
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.22)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.1)"; }}
+                      aria-label="Close gallery"
+                    >✕</button>
+                  </div>
+
+                  {/* Main image area */}
+                  <div style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "#090e18" }}>
+                    <img
+                      key={galleryImages[galleryIndex]}
+                      src={galleryImages[galleryIndex]}
+                      alt={`${galleryDayLabel} wound photo ${galleryIndex + 1}`}
+                      style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block", userSelect: "none" }}
+                    />
+                    {/* Prev */}
+                    {galleryImages.length > 1 && (
+                      <button
+                        onClick={() => setGalleryIndex(i => (i - 1 + galleryImages.length) % galleryImages.length)}
+                        style={{
+                          position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)",
+                          width: 44, height: 44, borderRadius: 12,
+                          background: "rgba(255,255,255,0.12)", backdropFilter: "blur(8px)",
+                          border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          transition: "background 0.15s", zIndex: 10,
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.25)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.12)"; }}
+                        aria-label="Previous photo"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                      </button>
+                    )}
+                    {/* Next */}
+                    {galleryImages.length > 1 && (
+                      <button
+                        onClick={() => setGalleryIndex(i => (i + 1) % galleryImages.length)}
+                        style={{
+                          position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                          width: 44, height: 44, borderRadius: 12,
+                          background: "rgba(255,255,255,0.12)", backdropFilter: "blur(8px)",
+                          border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          transition: "background 0.15s", zIndex: 10,
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.25)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.12)"; }}
+                        aria-label="Next photo"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Thumbnail strip */}
+                  {galleryImages.length > 1 && (
+                    <div style={{
+                      flexShrink: 0, padding: "10px 16px",
+                      borderTop: "1px solid rgba(255,255,255,0.08)",
+                      background: "rgba(0, 0, 0, 0.7)", backdropFilter: "blur(8px)",
+                      display: "flex", gap: 8,
+                      justifyContent: galleryImages.length <= 5 ? "center" : "flex-start",
+                      overflowX: "auto",
+                    }}>
+                      {galleryImages.map((img, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setGalleryIndex(idx)}
+                          style={{
+                            flexShrink: 0, width: 56, height: 56, borderRadius: 10, overflow: "hidden",
+                            border: `2.5px solid ${idx === galleryIndex ? "#378ADD" : "rgba(255,255,255,0.18)"}`,
+                            cursor: "pointer", padding: 0, background: "rgba(0,0,0,0.3)",
+                            opacity: idx === galleryIndex ? 1 : 0.55,
+                            transform: idx === galleryIndex ? "scale(1.1)" : "scale(1)",
+                            transition: "opacity 0.15s, border-color 0.15s, transform 0.15s",
+                          }}
+                          onMouseEnter={e => { if (idx !== galleryIndex) e.currentTarget.style.opacity = "0.8"; }}
+                          onMouseLeave={e => { if (idx !== galleryIndex) e.currentTarget.style.opacity = "0.55"; }}
+                          aria-label={`View photo ${idx + 1}`}
+                        >
+                          <img src={img} alt={`Thumbnail ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Dot indicators */}
+                  {galleryImages.length > 1 && (
+                    <div style={{ display: "flex", justifyContent: "center", gap: 6, padding: "8px 16px 12px", background: "rgba(0,0,0,0.7)", flexShrink: 0 }}>
+                      {galleryImages.map((_, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setGalleryIndex(idx)}
+                          style={{
+                            width: idx === galleryIndex ? 22 : 7, height: 7, borderRadius: 99,
+                            background: idx === galleryIndex ? "#378ADD" : "rgba(255,255,255,0.3)",
+                            border: "none", cursor: "pointer", padding: 0,
+                            transition: "width 0.25s, background 0.25s",
+                          }}
+                          aria-label={`Go to photo ${idx + 1}`}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {reminderModalAlert && (
               <div
                 onClick={() => setReminderModalAlert(null)}
@@ -1661,6 +2148,144 @@ export default function PatientDetailPage() {
         {/* Responsive styles */}
         <style>{`
           @keyframes spin { to { transform: rotate(360deg); } }
+
+          /* ── Previous Day History layout classes ── */
+          .history-score-row {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+            padding: 16px 16px 0;
+            margin-bottom: 16px;
+          }
+          .history-score-card {
+            border-radius: 14px;
+            padding: 14px 16px;
+          }
+          .history-bottom-row {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            padding: 0 16px 16px;
+          }
+          .history-override-col { flex: 1; min-width: 0; }
+          .history-images-col { flex: 1; min-width: 0; }
+          .history-image-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+          }
+
+          .history-header-score-group {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            flex-wrap: wrap;
+            min-width: 0;
+          }
+          .history-header-chip {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 4px;
+            padding: 8px 12px;
+            border-radius: 12px;
+            min-width: 0;
+            max-width: 140px;
+            white-space: nowrap;
+          }
+          .history-header-chip .heading-font {
+            font-size: 17px !important;
+          }
+
+          @media (max-width: 640px) {
+            .history-header-score-group {
+              width: 100%;
+              justify-content: flex-end;
+            }
+            .history-header-chip {
+              flex: 1 1 120px;
+              min-width: 0;
+            }
+          }
+
+          @media (min-width: 641px) {
+            .history-header-score-group {
+              justify-content: flex-end;
+            }
+          }
+
+          .history-image-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+          }
+
+          @media (min-width: 480px) {
+            .history-image-grid {
+              grid-template-columns: repeat(5, 1fr);
+            }
+          }
+
+          @media (min-width: 640px) {
+            .history-score-row {
+              grid-template-columns: 1fr 1fr;
+              gap: 14px;
+            }
+            .history-bottom-row {
+              flex-direction: row;
+              align-items: flex-start;
+            }
+          }
+
+          @media (min-width: 1024px) {
+            .history-score-row {
+              grid-template-columns: 1fr 1fr;
+              padding: 20px 20px 0;
+              margin-bottom: 20px;
+            }
+            .history-bottom-row {
+              padding: 0 20px 20px;
+            }
+          }
+
+          .history-score-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+          }
+          .history-answers-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+          }
+          .history-images-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+          }
+
+          @media (min-width: 480px) {
+            .history-images-grid {
+              grid-template-columns: repeat(5, 1fr);
+            }
+          }
+          @media (min-width: 640px) {
+            .history-score-grid {
+              grid-template-columns: 1fr 1fr;
+              gap: 12px;
+            }
+            .history-answers-grid {
+              grid-template-columns: repeat(2, 1fr);
+              gap: 10px;
+            }
+          }
+          @media (min-width: 1024px) {
+            .history-answers-grid {
+              grid-template-columns: repeat(3, 1fr);
+            }
+          }
 
           .patient-header-bar {
             border-radius: 14px;
